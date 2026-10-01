@@ -1,13 +1,13 @@
 # Launching a test instance
 
-How `pokit launch` gets a WebView2 app running with its own profile and a debugging port, and when it counts a page as ready. Code: `session::launch::spawn_app`, `session::launch::active_port`, `session::launch::wait_ready`, `State::ensure_ready` (session/pages.rs), `launch::READY_PROBE`, `devtools::get_json`.
+How `pokit launch` gets a WebView2 app running with its own profile and a debugging port, and when it counts a page as ready. Code: `session::launch::spawn_app`, `session::launch::sweep_profiles`, `session::launch::active_port`, `session::launch::wait_ready`, `State::ensure_ready` (session/pages.rs), `launch::READY_PROBE`, `devtools::get_json`.
 
 ## Isolation: what pokit can and cannot separate
 
 - **The WebView2 profile and the debugging port, yes.** `WEBVIEW2_USER_DATA_FOLDER` *replaces* the folder the app passes to `CreateCoreWebView2EnvironmentWithOptions`. `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` is *appended* to the arguments the app passes. Tauri passes both explicitly (`app_local_data_dir`, and wry's `--disable-features=msWebOOUI,…`), and neither blocks the variables. Source: `WebView2.idl` lines 8873–8886 in SDK 1.0.4258.31, and a probe on runtime 154.0.4258.37 (2026-10-01).
 - **A debugging port on a profile that is already in use, no.** Creating the second controller fails with `0x8007139F` (`ERROR_INVALID_STATE`), and the port never opens. A test instance therefore always gets a fresh folder.
 - **The app's own data, no.** Tauri resolves `app_data_dir` and the related folders through `SHGetKnownFolderPath`, so `APPDATA` and `LOCALAPPDATA` have no effect. Redirecting `USERPROFILE` does move them on a default machine, but that behaviour is undocumented, breaks under folder-redirection policy, and moves `~/.ssh` too. **Maintainer's call (2026-10-01, #3):** pokit isolates only the WebView2 profile and the port; the caller isolates app data through `launch --env` or app arguments. The alternative shown was pokit redirecting `USERPROFILE`.
-- **A profile pokit created is deleted when the session ends** (≈8 MB each). It takes retries: WebView2's processes hold its files for a moment after the app is killed. A `--data-dir` the caller supplied is left alone.
+- **A profile pokit created is removed in two steps.** `close` makes one attempt and returns; unloaded, the instance's six WebView2 processes are gone 0.4 s after `close` (measured 2026-10-01), so that attempt usually comes too early. Whatever WebView2 still holds is removed by the next `launch`, which sweeps `instances/` in the background for up to 30 s. Profiles are named `<stamp>-<session pid>`; the sweep skips its own and those of any running pokit process. A `--data-dir` the caller supplied is never touched. **Maintainer's call (2026-10-01, #9):** the alternative shown was keeping `close` retrying until the profile was gone. Under 25 parallel instances that retrying took 5–10 s per `close` (measured from the run records), and the last profile now stays on disk (~8 MB) until the next `launch`.
 
 ## The debugging port
 

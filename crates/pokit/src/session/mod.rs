@@ -209,7 +209,7 @@ async fn serve(mut config: Config) {
     tokio::spawn(pages::collect_events(state.clone(), events_rx));
 
     if let Err(e) = launch::wait_ready(&state, app.as_mut()).await {
-        state.remove_owned_data_dir_after(info.app_pid);
+        state.try_remove_owned_data_dir_after(info.app_pid);
         return fail_start(pid, &config, None, e);
     }
 
@@ -226,6 +226,7 @@ async fn serve(mut config: Config) {
 
     let app = Arc::new(tokio::sync::Mutex::new(app));
     tokio::spawn(pages::discover(state.clone()));
+    tokio::spawn(launch::sweep_profiles(pid));
     tokio::spawn(watchdog(state.clone(), app.clone()));
 
     loop {
@@ -343,20 +344,16 @@ async fn watchdog(state: Arc<State>, app: Arc<tokio::sync::Mutex<Option<tokio::p
 }
 
 impl State {
-    /// Removes the profile directory pokit created, once `app`'s processes have let go of it.
-    fn remove_owned_data_dir_after(&self, app: Option<u32>) {
+    /// Makes one attempt to remove the profile directory pokit created, after ending `app`;
+    /// what is still held is left for the next launch's sweep.
+    fn try_remove_owned_data_dir_after(&self, app: Option<u32>) {
         let Some(dir) = &self.owned_data_dir else {
             return;
         };
         if let Some(pid) = app {
             let _ = crate::proc::kill_tree(pid);
         }
-        for _ in 0..50 {
-            if std::fs::remove_dir_all(dir).is_ok() || !dir.exists() {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn shutdown(&self) -> ! {
@@ -369,7 +366,7 @@ impl State {
                     _ => json!(crate::proc::kill_tree(pid)),
                 };
             }
-            self.remove_owned_data_dir_after(None);
+            self.try_remove_owned_data_dir_after(None);
             ended["profile_left"] = json!(self.owned_data_dir.as_ref().map(|d| d.exists()));
         }
         self.record("shutdown", &Value::Null, 0, &ended);

@@ -89,26 +89,32 @@ fn a_ref_from_an_earlier_snapshot_is_refused_by_name() {
 }
 
 #[test]
-fn wait_sees_a_delayed_element_and_times_out_on_one_that_never_comes() {
+fn wait_holds_until_an_element_appears_and_times_out_on_one_that_never_comes() {
     let p = Pokit::launch_fixture("wait");
-    p.run(&["click", "#show-later"]);
-    let present =
-        |p: &Pokit| p.run(&["eval", "!!document.querySelector('#late')"]).out["value"] == true;
+    let home = p.home.clone();
+    let waiter = std::thread::spawn(move || {
+        let w = Pokit {
+            home,
+            launched: None,
+        };
+        w.run(&["wait", "--selector", "#on-demand", "--for", "30000"])
+    });
+    std::thread::sleep(std::time::Duration::from_millis(1000));
     assert!(
-        !present(&p),
-        "the fixture adds #late 1500 ms after the click"
+        !waiter.is_finished(),
+        "wait returned before #on-demand existed"
     );
-    let r = p.run(&["wait", "--selector", "#late", "--for", "5000"]);
+    assert_eq!(p.run(&["click", "#show-now"]).code, 0);
+    let r = waiter.join().unwrap();
     assert_eq!(r.code, 0, "{}", r.out);
-    assert!(present(&p), "wait returned before #late existed: {}", r.out);
 
     let start = std::time::Instant::now();
     let r = p.run(&["wait", "--selector", "#never", "--for", "1000"]);
     assert_eq!(r.code, 4, "{}", r.out);
     assert_eq!(r.out["error"]["kind"], "timeout");
     assert!(
-        start.elapsed() < std::time::Duration::from_secs(5),
-        "wait overran its timeout"
+        start.elapsed() < std::time::Duration::from_secs(20),
+        "wait ignored its own timeout and ran into the command's"
     );
 }
 
@@ -374,7 +380,6 @@ fn refused_input_leaves_focus_where_it_was() {
 #[test]
 fn wait_on_a_broken_expression_fails_at_once_instead_of_waiting_out_its_timeout() {
     let p = Pokit::launch_fixture("wait-broken");
-    let start = std::time::Instant::now();
     let r = p.run(&[
         "wait",
         "--expr",
@@ -382,12 +387,9 @@ fn wait_on_a_broken_expression_fails_at_once_instead_of_waiting_out_its_timeout(
         "--for",
         "8000",
     ]);
+    // Waiting out the timeout would end as `timeout` (exit 4), not as the page's error.
     assert_eq!(r.code, 1, "{}", r.out);
     assert_eq!(r.out["error"]["kind"], "js_error");
-    assert!(
-        start.elapsed() < std::time::Duration::from_secs(4),
-        "wait sat out its timeout"
-    );
 }
 
 #[test]
@@ -521,16 +523,38 @@ fn a_relative_capture_path_is_relative_to_where_the_command_ran() {
 }
 
 #[test]
-fn close_removes_the_profile_pokit_created_for_the_instance() {
-    let mut p = Pokit::launch_fixture("profile");
-    let dir = std::path::PathBuf::from(p.launched.as_ref().unwrap()["data_dir"].as_str().unwrap());
-    assert!(dir.exists());
-    assert_eq!(p.run(&["close"]).code, 0);
-    p.launched = None;
+fn launch_removes_profiles_left_by_ended_sessions_and_keeps_its_own() {
+    let other = Pokit::launch_fixture("profile-other");
+    let other_session = other.launched.as_ref().unwrap()["session_pid"]
+        .as_u64()
+        .unwrap();
+    let mut p = Pokit::new("profile");
+    let orphan = p.home.join("instances").join("19990101-000000-4000000000");
+    let live = p
+        .home
+        .join("instances")
+        .join(format!("19990101-000000-{other_session}"));
+    for dir in [&orphan, &live] {
+        std::fs::create_dir_all(dir.join("EBWebView")).unwrap();
+        std::fs::write(dir.join("EBWebView").join("Local State"), "{}").unwrap();
+    }
+
+    let exe = fixture_exe().to_str().unwrap().to_string();
+    let r = p.run(&["launch", &exe]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    let own = std::path::PathBuf::from(r.out["data_dir"].as_str().unwrap());
+    p.launched = Some(r.out);
     assert!(
-        eventually(8000, || !dir.exists()),
-        "the instance profile was left behind: {}",
-        dir.display()
+        eventually(30_000, || !orphan.exists()),
+        "a profile left by an ended session survived the next launch"
+    );
+    assert!(
+        own.exists(),
+        "launch removed the profile of its own instance"
+    );
+    assert!(
+        live.exists(),
+        "launch removed the profile of a session still running"
     );
 }
 

@@ -49,6 +49,44 @@ pub(super) fn spawn_app(config: &Config) -> Result<(tokio::process::Child, PathB
     Ok((child, dir))
 }
 
+/// Removes the profiles under `instances/` left by sessions that have ended, retrying for up to
+/// 30 s while their files are still held. Profiles are named `<stamp>-<session pid>`; the session
+/// `own_pid` and any other running pokit process keep theirs.
+pub(super) async fn sweep_profiles(own_pid: u32) {
+    let me = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase()));
+    let ended =
+        |pid: u32| pid != own_pid && crate::proc::image_name(pid).map(|n| n.to_lowercase()) != me;
+    let mut left: Vec<PathBuf> = std::fs::read_dir(home::home().join("instances"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|path| path.is_dir())
+        .filter(|path| profile_session_pid(path).map(ended).unwrap_or(false))
+        .collect();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !left.is_empty() && Instant::now() < deadline {
+        left.retain(|dir| std::fs::remove_dir_all(dir).is_err() && dir.exists());
+        if !left.is_empty() {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+}
+
+/// The session pid in a profile directory named `<YYYYMMDD>-<HHMMSS>-<pid>`.
+fn profile_session_pid(dir: &Path) -> Option<u32> {
+    let name = dir.file_name()?.to_str()?;
+    let mut parts = name.splitn(3, '-');
+    let (date, time, pid) = (parts.next()?, parts.next()?, parts.next()?);
+    let digits = |s: &str, n: usize| s.len() == n && s.chars().all(|c| c.is_ascii_digit());
+    if !digits(date, 8) || !digits(time, 6) {
+        return None;
+    }
+    pid.parse().ok()
+}
+
 /// Where the browser reports the debugging port it picked, under a WebView2 profile directory.
 fn active_port_file(data_dir: &Path) -> PathBuf {
     data_dir.join("EBWebView").join("DevToolsActivePort")

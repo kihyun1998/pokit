@@ -37,6 +37,7 @@
   <section id="pane-actions">
     <h2>Actions</h2>
     <button id="show-later" type="button">Show later</button>
+    <button id="show-now" type="button">Show now</button>
     <button id="open-second" type="button">Open second window</button>
     <button id="throw" type="button">Throw</button>
     <button id="backend-log" type="button">Backend log</button>
@@ -87,6 +88,14 @@
         p.textContent = 'Arrived';
         $('late-slot').appendChild(p);
       }, 1500);
+    });
+
+    // The on-demand element appears as soon as its button is pressed.
+    $('show-now').addEventListener('click', () => {
+      const p = document.createElement('p');
+      p.id = 'on-demand';
+      p.textContent = 'Here';
+      $('late-slot').appendChild(p);
     });
 
     $('open-second').addEventListener('click', () => invoke('open_second'));
