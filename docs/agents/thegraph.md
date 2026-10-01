@@ -14,7 +14,7 @@ A Rust CLI that feeds real input into a running webview desktop app (Tauri and t
 | Win32 — `SendInput` (incl. UIPI), foreground-window check, per-window DPI | how it works | Microsoft Learn — **summarized** | binding |
 | macOS — `CGEventPost`/`CGEventPostToPid`, `AXIsProcessTrusted`, ScreenCaptureKit | how it works | Apple developer docs — **summarized** | binding |
 | Chromium Trace Event Format — summarising a trace into style/layout/paint | how it works | its published spec — **summarized** | binding |
-| penterm — `docs/agents/dogfooding.md` § Driving the running app over CDP, `measure-held-size-keys.mjs` | how it works | its source tree (`D:\github\penterm`) — raw | binding for the numbers pokit must reproduce; example otherwise |
+| penterm — `docs/agents/dogfooding.md` § Driving the running app over CDP, `measure-held-size-keys.mjs` | how it works | its source tree (`D:\github\penterm`) — raw | example |
 | Playwright — `connectOverCDP`, key/mouse events over CDP | how it works | its source tree — raw | example |
 | chromiumoxide — write our own CDP client or use this crate | how it works | its source tree — raw | example |
 | enigo, xcap, core-graphics, windows-rs — OS input, capture, platform API candidates | how it works | their source trees — raw | example |
