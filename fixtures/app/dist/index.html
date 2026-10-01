@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>pokit fixture</title>
+  <style>
+    body { font: 14px system-ui, sans-serif; margin: 16px; }
+    section { border: 1px solid #ccc; padding: 8px; margin-bottom: 8px; }
+  </style>
+</head>
+<body>
+  <h1>pokit fixture</h1>
+
+  <section id="pane-form">
+    <h2>Form</h2>
+    <label for="name">Name</label>
+    <input id="name" type="text">
+    <label for="password">Password</label>
+    <input id="password" type="password">
+    <button id="submit" type="button">Submit</button>
+    <p id="result" role="status"></p>
+  </section>
+
+  <section id="pane-other">
+    <h2>Other</h2>
+    <label for="other-input">Other input</label>
+    <input id="other-input" type="text">
+  </section>
+
+  <section id="pane-events">
+    <h2>Events</h2>
+    <button id="target" type="button">Event target</button>
+    <p id="last-mouse" role="status"></p>
+    <p id="last-key" role="status"></p>
+  </section>
+
+  <section id="pane-actions">
+    <h2>Actions</h2>
+    <button id="show-later" type="button">Show later</button>
+    <button id="open-second" type="button">Open second window</button>
+    <button id="throw" type="button">Throw</button>
+    <button id="backend-log" type="button">Backend log</button>
+    <div id="late-slot"></div>
+  </section>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+
+    // Every keyboard, input and focus event, in order, for reading back what the page received.
+    window.__events = [];
+    const describe = (t) => (t === window ? 'window' : t.id || t.nodeName);
+    for (const type of ['keydown', 'keyup', 'input', 'focusin', 'focusout']) {
+      document.addEventListener(type, (e) => window.__events.push([Math.round(performance.now()), type, describe(e.target), e.key ?? '']), true);
+    }
+    for (const type of ['focus', 'blur']) {
+      window.addEventListener(type, (e) => { if (e.target === window) window.__events.push([Math.round(performance.now()), type, 'window', '']); });
+    }
+    const invoke = (cmd, args) => window.__TAURI__.core.invoke(cmd, args);
+
+    // The form echoes what was submitted, password included.
+    $('submit').addEventListener('click', () => {
+      const name = $('name').value;
+      const password = $('password').value;
+      $('result').textContent = `Hello, ${name}`;
+      console.log(`submit name=${name} password=${password}`);
+    });
+
+    // Each mouse event on the target is written out by type.
+    for (const type of ['click', 'dblclick', 'contextmenu', 'mouseover']) {
+      $('target').addEventListener(type, (e) => {
+        if (type === 'contextmenu') e.preventDefault();
+        $('last-mouse').textContent = type;
+      });
+    }
+
+    // Every keydown is written out as modifiers plus the physical key.
+    window.addEventListener('keydown', (e) => {
+      const mods = [e.ctrlKey && 'Ctrl', e.altKey && 'Alt', e.shiftKey && 'Shift', e.metaKey && 'Meta'].filter(Boolean);
+      $('last-key').textContent = [...mods, e.code].join('+');
+    }, true);
+
+    // The late element appears 1500 ms after the button is pressed.
+    $('show-later').addEventListener('click', () => {
+      setTimeout(() => {
+        const p = document.createElement('p');
+        p.id = 'late';
+        p.textContent = 'Arrived';
+        $('late-slot').appendChild(p);
+      }, 1500);
+    });
+
+    $('open-second').addEventListener('click', () => invoke('open_second'));
+    $('throw').addEventListener('click', () => setTimeout(() => { throw new Error('fixture boom'); }));
+    $('backend-log').addEventListener('click', () => invoke('backend_log', { line: 'hello' }));
+  </script>
+</body>
+</html>

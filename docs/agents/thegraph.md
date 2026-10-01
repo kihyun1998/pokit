@@ -2,7 +2,7 @@
 
 ## What this project is
 
-A Rust CLI that feeds real input into a running webview desktop app (Tauri and the like) and measures frames and response time — over CDP on Windows, through a plugin on macOS.
+A Rust CLI an AI agent drives to test a running webview desktop app (Tauri and the like), functional and performance — launch, see, act, verify, measure and record — over CDP on Windows, through a plugin on macOS.
 
 ## References
 
