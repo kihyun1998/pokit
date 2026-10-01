@@ -4,15 +4,19 @@ mod cdp;
 mod chord;
 mod client;
 mod devtools;
+mod doctor;
 mod home;
 mod output;
 mod proc;
 mod redact;
+mod request;
 mod session;
 mod snapshot;
 
 use clap::{Parser, Subcommand};
+use home::{Mode, Status};
 use output::{Failure, Kind};
+use request::Request;
 use serde_json::{json, Value};
 use std::io::Read;
 use std::process::ExitCode;
@@ -200,7 +204,7 @@ fn outcome_json(name: &str, outcome: output::Outcome) -> (String, i32, Value) {
 
 fn dispatch(cli: Cli) -> (String, i32, Value) {
     let timeout = Duration::from_secs(cli.timeout);
-    let (name, args) = match cli.command {
+    let request = match cli.command {
         Command::Capabilities => return outcome_json("capabilities", Ok(capabilities())),
         Command::Launch {
             exe,
@@ -217,7 +221,7 @@ fn dispatch(cli: Cli) -> (String, i32, Value) {
                 Err(f) => return outcome_json("launch", Err(f)),
             };
             let config = session::Config {
-                mode: "launch".into(),
+                mode: Mode::Launch,
                 exe: Some(exe),
                 args,
                 env,
@@ -227,7 +231,7 @@ fn dispatch(cli: Cli) -> (String, i32, Value) {
                 idle_timeout_secs: idle_timeout,
                 ready_timeout_secs: ready_timeout,
             };
-            return start_session("launch", config, timeout);
+            return start_session(config, timeout);
         }
         Command::Attach {
             port,
@@ -236,7 +240,7 @@ fn dispatch(cli: Cli) -> (String, i32, Value) {
             ready_timeout,
         } => {
             let config = session::Config {
-                mode: "attach".into(),
+                mode: Mode::Attach,
                 exe: None,
                 args: vec![],
                 env: vec![],
@@ -246,27 +250,27 @@ fn dispatch(cli: Cli) -> (String, i32, Value) {
                 idle_timeout_secs: idle_timeout,
                 ready_timeout_secs: ready_timeout,
             };
-            return start_session("attach", config, timeout);
+            return start_session(config, timeout);
         }
         Command::Doctor { port: Some(port) } => {
             let rt = tokio::runtime::Runtime::new().unwrap();
-            let checks = rt.block_on(session::doctor_checks(port));
-            return outcome_json("doctor", session::doctor_outcome(checks));
+            let checks = rt.block_on(doctor::checks(port));
+            return outcome_json("doctor", doctor::outcome(checks));
         }
         Command::Doctor { port: None } => {
             if home::read_session()
-                .filter(|s| s.status == "ready")
+                .filter(|s| s.status == Status::Ready)
                 .is_none()
             {
                 let check = json!({ "check": "session", "ok": false, "detail": "no session; run launch or attach, or pass --port" });
-                return outcome_json("doctor", session::doctor_outcome(vec![check]));
+                return outcome_json("doctor", doctor::outcome(vec![check]));
             }
-            ("doctor", json!({}))
+            Request::Doctor
         }
-        Command::Close => ("close", json!({})),
-        Command::Targets { select } => ("targets", json!({ "select": select })),
-        Command::Snapshot => ("snapshot", json!({})),
-        Command::Read { target } => ("read", json!({ "target": target })),
+        Command::Close => Request::Close,
+        Command::Targets { select } => Request::Targets { select },
+        Command::Snapshot => Request::Snapshot,
+        Command::Read { target } => Request::Read { target },
         Command::Click {
             target,
             x,
@@ -275,10 +279,15 @@ fn dispatch(cli: Cli) -> (String, i32, Value) {
             right,
             hover,
             require_focus,
-        } => (
-            "click",
-            json!({ "target": target, "x": x, "y": y, "double": double, "right": right, "hover": hover, "require_focus": require_focus }),
-        ),
+        } => Request::Click {
+            target,
+            x,
+            y,
+            double,
+            right,
+            hover,
+            require_focus,
+        },
         Command::Type {
             text,
             secret,
@@ -317,33 +326,38 @@ fn dispatch(cli: Cli) -> (String, i32, Value) {
                     }
                 }
             };
-            (
-                "type",
-                json!({ "text": text, "secret": secret, "into": into, "require_focus": require_focus }),
-            )
+            Request::Type {
+                text,
+                secret,
+                into,
+                require_focus,
+            }
         }
         Command::Key {
             chord,
             into,
             require_focus,
-        } => (
-            "key",
-            json!({ "chord": chord, "into": into, "require_focus": require_focus }),
-        ),
+        } => Request::Key {
+            chord,
+            into,
+            require_focus,
+        },
         Command::Wait {
             selector,
             text,
             expr,
             wait_ms,
-        } => (
-            "wait",
-            json!({ "selector": selector, "text": text, "expr": expr, "timeout_ms": wait_ms }),
-        ),
-        Command::Capture { target, out } => (
-            "capture",
-            json!({ "target": target, "out": out.map(|o| absolute(&o)) }),
-        ),
-        Command::Logs { since } => ("logs", json!({ "since": since })),
+        } => Request::Wait {
+            selector,
+            text,
+            expr,
+            timeout_ms: wait_ms,
+        },
+        Command::Capture { target, out } => Request::Capture {
+            target,
+            out: out.map(|o| absolute(&o)),
+        },
+        Command::Logs { since } => Request::Logs { since },
         Command::Eval { expression, file } => {
             let expression = match (expression, file) {
                 (_, Some(f)) => match std::fs::read_to_string(&f) {
@@ -369,22 +383,20 @@ fn dispatch(cli: Cli) -> (String, i32, Value) {
                     )
                 }
             };
-            (
-                "eval",
-                json!({ "expression": expression, "timeout_ms": cli.timeout * 1000 }),
-            )
+            Request::Eval {
+                expression,
+                timeout_ms: cli.timeout * 1000,
+            }
         }
         Command::Session { .. } => unreachable!(),
     };
-    let wait_extra = args["timeout_ms"]
-        .as_u64()
-        .map(Duration::from_millis)
-        .unwrap_or_default();
-    send(name, args, timeout + wait_extra)
+    let wait = timeout + request.extra_wait();
+    send(request, wait)
 }
 
-fn send(name: &str, args: Value, timeout: Duration) -> (String, i32, Value) {
-    let Some(info) = home::read_session().filter(|s| s.status == "ready") else {
+fn send(request: Request, timeout: Duration) -> (String, i32, Value) {
+    let name = request.kind().name();
+    let Some(info) = home::read_session().filter(|s| s.status == Status::Ready) else {
         return outcome_json(
             name,
             Err(Failure::new(
@@ -393,13 +405,14 @@ fn send(name: &str, args: Value, timeout: Duration) -> (String, i32, Value) {
             )),
         );
     };
-    match client::request(&info, name, args, timeout) {
+    match client::request(&info, &request, timeout) {
         Ok((code, out)) => (name.to_string(), code, out),
         Err(e) => outcome_json(name, Err(Failure::new(Kind::NoSession, e))),
     }
 }
 
-fn start_session(name: &str, config: session::Config, timeout: Duration) -> (String, i32, Value) {
+fn start_session(config: session::Config, timeout: Duration) -> (String, i32, Value) {
+    let name = config.mode.name();
     if !cfg!(windows) {
         return outcome_json(
             name,
@@ -430,8 +443,8 @@ fn start_session(name: &str, config: session::Config, timeout: Duration) -> (Str
         let deadline = Instant::now() + Duration::from_secs(config.ready_timeout_secs) + timeout;
         loop {
             match home::read_session().filter(|s| s.pid == pid) {
-                Some(s) if s.status == "ready" => {
-                    return match client::request(&s, "status", Value::Null, timeout) {
+                Some(s) if s.status == Status::Ready => {
+                    return match client::request(&s, &Request::Status, timeout) {
                         Ok((code, mut out)) => {
                             out["command"] = json!(name);
                             (name.to_string(), code, out)
@@ -439,7 +452,7 @@ fn start_session(name: &str, config: session::Config, timeout: Duration) -> (Str
                         Err(e) => outcome_json(name, Err(Failure::new(Kind::Error, e))),
                     };
                 }
-                Some(s) if s.status == "failed" => {
+                Some(s) if s.status == Status::Failed => {
                     let _ = std::fs::remove_file(home::session_file());
                     let msg = s
                         .error
@@ -468,14 +481,14 @@ fn clear_stale_session() -> Result<(), Failure> {
     let Some(info) = home::read_session() else {
         return Ok(());
     };
-    if info.status == "ready" && client::alive(&info) {
+    if info.status == Status::Ready && client::alive(&info) {
         return Err(Failure::new(
             Kind::SessionExists,
             "a session is already running; run `pokit close` first",
         )
         .with("session_pid", info.pid));
     }
-    if info.mode == "launch" {
+    if info.mode == Mode::Launch {
         if let (Some(pid), Some(exe)) = (info.app_pid, &info.app_exe) {
             let wanted = std::path::Path::new(exe)
                 .file_name()
@@ -492,23 +505,24 @@ fn clear_stale_session() -> Result<(), Failure> {
     Ok(())
 }
 
+/// What this platform supports, for every command the CLI defines.
 fn capabilities() -> output::Fields {
-    let windows = cfg!(windows);
-    let cdp = |ok: bool| {
-        if ok {
-            json!({ "supported": true, "route": "cdp" })
-        } else {
-            unsupported()
-        }
-    };
+    use clap::CommandFactory;
+    let mut commands = serde_json::Map::new();
+    for sub in Cli::command()
+        .get_subcommands()
+        .filter(|s| !s.is_hide_set())
+    {
+        let support = match sub.get_name() {
+            "capabilities" => json!({ "supported": true }),
+            _ if cfg!(windows) => json!({ "supported": true, "route": "cdp" }),
+            _ => unsupported(),
+        };
+        commands.insert(sub.get_name().to_string(), support);
+    }
     fields! {
         "platform" => std::env::consts::OS,
-        "commands" => json!({
-            "launch": cdp(windows), "attach": cdp(windows), "close": cdp(windows), "targets": cdp(windows),
-            "snapshot": cdp(windows), "read": cdp(windows), "click": cdp(windows), "type": cdp(windows),
-            "key": cdp(windows), "wait": cdp(windows), "capture": cdp(windows), "logs": cdp(windows),
-            "eval": cdp(windows), "doctor": cdp(windows), "capabilities": { "supported": true },
-        }),
+        "commands" => Value::Object(commands),
     }
 }
 

@@ -18,18 +18,44 @@ pub fn session_file() -> PathBuf {
     home().join("session.json")
 }
 
+/// How a session got its app instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    /// pokit started the instance, and ends it with the session.
+    Launch,
+    /// The instance was already running, and outlives the session.
+    Attach,
+}
+
+impl Mode {
+    pub fn name(self) -> &'static str {
+        match self {
+            Mode::Launch => "launch",
+            Mode::Attach => "attach",
+        }
+    }
+}
+
+/// Where a session is in starting up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Status {
+    Starting,
+    Ready,
+    Failed,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInfo {
     /// The session process.
     pub pid: u32,
-    /// `starting`, `ready` or `failed`.
-    pub status: String,
+    pub status: Status,
     pub error: Option<String>,
     /// Loopback port and token the session serves requests on.
     pub port: u16,
     pub token: String,
-    /// `launch` or `attach`.
-    pub mode: String,
+    pub mode: Mode,
     pub app_pid: Option<u32>,
     pub app_exe: Option<String>,
     /// When the launched app started, as a Windows FILETIME; identifies it beyond its pid.

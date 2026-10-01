@@ -1,6 +1,7 @@
 //! A command's request to the session, over loopback.
 
 use crate::home::SessionInfo;
+use crate::request::Request;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
@@ -10,8 +11,7 @@ use std::time::Duration;
 /// session port must first answer `hello` with the session's proof; nothing else is sent before that.
 pub fn request(
     info: &SessionInfo,
-    command: &str,
-    args: Value,
+    request: &Request,
     timeout: Duration,
 ) -> Result<(i32, Value), String> {
     let mut stream =
@@ -36,7 +36,7 @@ pub fn request(
         ));
     }
     stream.set_read_timeout(Some(timeout)).ok();
-    let req = json!({ "token": info.token, "command": command, "args": args });
+    let req = json!({ "token": info.token, "request": request });
     stream
         .write_all(format!("{req}\n").as_bytes())
         .map_err(|e| format!("could not send to the session: {e}"))?;
@@ -56,7 +56,7 @@ pub fn request(
 /// Whether the session in `info` answers a ping.
 pub fn alive(info: &SessionInfo) -> bool {
     matches!(
-        request(info, "ping", Value::Null, Duration::from_secs(3)),
+        request(info, &Request::Ping, Duration::from_secs(3)),
         Ok((0, _))
     )
 }

@@ -1,6 +1,6 @@
 # Launching a test instance
 
-How `pokit launch` gets a WebView2 app running with its own profile and a debugging port, and when it counts a page as ready. Code: `session::spawn_app`, `session::active_port`, `session::wait_ready`, `State::ensure_ready`, `READY_PROBE`, `devtools::get_json`.
+How `pokit launch` gets a WebView2 app running with its own profile and a debugging port, and when it counts a page as ready. Code: `session::launch::spawn_app`, `session::launch::active_port`, `session::launch::wait_ready`, `State::ensure_ready` (session/pages.rs), `launch::READY_PROBE`, `devtools::get_json`.
 
 ## Isolation: what pokit can and cannot separate
 

@@ -1,6 +1,6 @@
 # Sending input over CDP
 
-How `click`, `type` and `key` reach the page on Windows, and what masking covers. Code: `session::send_key`, `State::click_cmd`, `State::focus_for_input`, `State::guard_target`, `chord`, `redact`.
+How `click`, `type` and `key` reach the page on Windows, and what masking covers. Code: `session::commands::send_key`, `State::click_cmd` (session/commands.rs), `State::focus_for_input`, `State::guard_target`, `chord`, `redact`.
 
 - **`Input.dispatchKeyEvent` replies only after the renderer acknowledges the event.** It also focuses the target widget first. If the event never reaches an input observer, the reply comes at once and still says success. Source: `content/browser/devtools/protocol/input_handler.cc` (Chromium main, 2026-09-25), lines 776–797 and 835–848. A reply is therefore not proof of delivery; see the readiness trap in [[launching-a-test-instance]].
 - **Typed text goes key by key where the US layout has the character** (`keyDown` with `text`, then `keyUp`), and through `Input.insertText` where it does not (Hangul, for example). A newline, `\r` or `\r\n`, is one Enter press.

@@ -1,6 +1,6 @@
 # Starting the session process
 
-How `launch` and `attach` start the background session (ADR-0001), how a command finds it, and how it ends. Code: `proc::spawn_detached`, `proc::Job`, `proc::kill_tree`, `proc::process_start_time`, `main::start_session`, `main::clear_stale_session`, `client::request`, `State::shutdown`.
+How `launch` and `attach` start the background session (ADR-0001), how a command finds it, and how it ends. Code: `proc::spawn_detached`, `proc::Job`, `proc::kill_tree`, `proc::process_start_time`, `main::start_session`, `main::clear_stale_session`, `client::request`, `State::shutdown` (session/mod.rs).
 
 - **The session inherits no handles at all.** A child started through `std::process::Command` inherits every handle the parent can pass on. That includes handles the CLI itself inherited from whoever ran it, such as a test harness's or an agent shell's stdout pipe. The session, and then the app it starts, kept that pipe open, so the caller waited for end-of-output until the session died. It was seen as `launch` returning only after the 600 s idle timeout. Marking only the CLI's own std handles non-inheritable was not enough: a handle cargo had passed down still reached the app, and `grep` downstream hung. `CreateProcessW` with `bInheritHandles = FALSE` is what fixed it.
 - **The session has no standard handles, so every child it starts gets explicit stdio.** `taskkill` started with inherited stdio failed silently, and `close` left the app running. It was caught by `launch_lists_the_main_page_and_close_removes_the_instance`.
