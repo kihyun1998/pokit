@@ -21,7 +21,7 @@ impl State {
             crate::clipboard::Read::Text(text) => fields! { "text" => text },
             crate::clipboard::Read::Withheld => fields! {
                 "text" => serde_json::Value::Null,
-                "withheld" => "another program marked the clipboard as not for monitoring                                (ExcludeClipboardContentFromMonitorProcessing), as password managers do",
+                "withheld" => "another program marked the clipboard as not for monitoring (ExcludeClipboardContentFromMonitorProcessing), as password managers do",
             },
         })
     }
