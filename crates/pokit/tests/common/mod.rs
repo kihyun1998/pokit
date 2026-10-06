@@ -2,6 +2,9 @@
 
 #![allow(dead_code)]
 
+#[cfg(windows)]
+pub mod window;
+
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
