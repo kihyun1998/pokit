@@ -42,6 +42,10 @@ pub struct Config {
     pub ready_timeout_secs: u64,
 }
 
+/// How long after the page is ready the session still gives the foreground back, for an app
+/// that brings itself forward late in its start-up.
+const LAUNCH_FOCUS_GRACE: Duration = Duration::from_millis(500);
+
 /// The largest request line the session reads.
 const MAX_REQUEST: u64 = 4 << 20;
 
@@ -95,6 +99,9 @@ struct State {
     waiters: Mutex<Vec<pages::Waiter>>,
     /// What the session did to the user's clipboard.
     clipboard: Mutex<clipboard::ClipboardState>,
+    /// How many times the app took the foreground during launch and was made to give it back,
+    /// and how many times Windows refused that.
+    foreground_given_back: Mutex<(u32, u32)>,
 }
 
 /// Runs the session process until `close`, idle timeout, or the launched app exits.
@@ -143,6 +150,8 @@ async fn serve(mut config: Config) {
     let mut app: Option<tokio::process::Child> = None;
     let mut data_dir = None;
     let mut job = None;
+    #[cfg(windows)]
+    let foreground_before = crate::proc::foreground();
     if config.mode == Mode::Launch {
         match launch::spawn_app(&config) {
             Ok((child, dir)) => {
@@ -201,6 +210,7 @@ async fn serve(mut config: Config) {
         profiling: Mutex::default(),
         waiters: Mutex::default(),
         clipboard: Mutex::default(),
+        foreground_given_back: Mutex::default(),
     });
 
     if let Some(child) = app.as_mut() {
@@ -228,8 +238,25 @@ async fn serve(mut config: Config) {
         }
     }
     tokio::spawn(pages::collect_events(state.clone(), events_rx));
+    let launching = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    #[cfg(windows)]
+    let keeping = info.app_pid.map(|pid| {
+        tokio::spawn(launch::keep_foreground(
+            state.clone(),
+            pid,
+            foreground_before,
+            launching.clone(),
+        ))
+    });
 
-    if let Err(e) = launch::wait_ready(&state, app.as_mut()).await {
+    let ready = launch::wait_ready(&state, app.as_mut()).await;
+    tokio::time::sleep(LAUNCH_FOCUS_GRACE).await;
+    launching.store(false, std::sync::atomic::Ordering::SeqCst);
+    #[cfg(windows)]
+    if let Some(keeping) = keeping {
+        *state.foreground_given_back.lock().unwrap() = keeping.await.unwrap_or((0, 0));
+    }
+    if let Err(e) = ready {
         state.try_remove_owned_data_dir_after(info.app_pid);
         return fail_start(pid, &config, None, e);
     }
@@ -426,6 +453,8 @@ impl State {
             "idle_timeout_secs" => self.config.idle_timeout_secs,
             "main" => json!({ "id": main, "title": title, "url": url, "time_origin": *self.main_origin.lock().unwrap() }),
             "clock" => self.clock_json(),
+            "foreground_given_back" => self.foreground_given_back.lock().unwrap().0,
+            "foreground_give_back_refused" => self.foreground_given_back.lock().unwrap().1,
         }
     }
 }

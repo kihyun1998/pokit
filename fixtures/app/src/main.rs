@@ -85,6 +85,11 @@ fn main() {
             if let Some(window) = app.get_webview_window("main") {
                 log_accelerator_keys(&window);
             }
+            if std::env::args().any(|a| a == "--take-focus") {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.set_focus();
+                }
+            }
             let _ = app;
             Ok(())
         })

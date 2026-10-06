@@ -49,6 +49,45 @@ pub(super) fn spawn_app(config: &Config) -> Result<(tokio::process::Child, PathB
     Ok((child, dir))
 }
 
+/// While `launching` holds, gives the foreground back to the window that had it before the
+/// launch whenever the app takes it; returns how many times it did, and how many times Windows
+/// refused.
+#[cfg(windows)]
+pub(super) async fn keep_foreground(
+    state: Arc<State>,
+    app_pid: u32,
+    before: (isize, u32),
+    launching: Arc<std::sync::atomic::AtomicBool>,
+) -> (u32, u32) {
+    use std::sync::atomic::Ordering;
+    let (mut gave_back, mut refused) = (0, 0);
+    if before.0 == 0 || before.1 == app_pid {
+        return (0, 0);
+    }
+    while launching.load(Ordering::SeqCst) {
+        if crate::proc::foreground().1 == app_pid {
+            let ok = crate::proc::set_foreground(before.0);
+            if ok {
+                gave_back += 1;
+            } else {
+                refused += 1;
+            }
+            state.log(
+                "session",
+                "info",
+                "",
+                format!(
+                    "the app took the foreground during launch; {} it back to pid {}",
+                    if ok { "gave" } else { "could not give" },
+                    before.1
+                ),
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    (gave_back, refused)
+}
+
 /// Removes the profiles under `instances/` left by sessions that have ended, retrying for up to
 /// 30 s while their files are still held. Profiles are named `<stamp>-<session pid>`; the session
 /// `own_pid` and any other running pokit process keep theirs.

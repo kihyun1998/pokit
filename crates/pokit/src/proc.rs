@@ -285,6 +285,34 @@ pub fn spawn_detached(exe: &std::path::Path, args: &[&str]) -> std::io::Result<u
         .map(|c| c.id())
 }
 
+/// The foreground window, as a number (0 when there is none), and the process that owns it.
+#[cfg(windows)]
+pub fn foreground() -> (isize, u32) {
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetForegroundWindow() -> *mut core::ffi::c_void;
+        fn GetWindowThreadProcessId(hwnd: *mut core::ffi::c_void, pid: *mut u32) -> u32;
+    }
+    // SAFETY: both take plain values; `pid` is a valid out-pointer.
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        let mut pid = 0;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        (hwnd as isize, pid)
+    }
+}
+
+/// Brings `hwnd` to the foreground, where Windows lets this process; whether it did.
+#[cfg(windows)]
+pub fn set_foreground(hwnd: isize) -> bool {
+    #[link(name = "user32")]
+    extern "system" {
+        fn SetForegroundWindow(hwnd: *mut core::ffi::c_void) -> i32;
+    }
+    // SAFETY: an invalid handle makes this fail, not misbehave.
+    unsafe { SetForegroundWindow(hwnd as *mut core::ffi::c_void) != 0 }
+}
+
 /// The image name of process `pid`, if it is running.
 #[cfg(windows)]
 pub fn image_name(pid: u32) -> Option<String> {
