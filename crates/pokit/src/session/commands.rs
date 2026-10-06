@@ -30,7 +30,12 @@ impl State {
         let outcome = match &request {
             Request::Ping => Ok(Fields::new()),
             Request::Status => Ok(self.status()),
-            Request::Close => Ok(fields! { "closed" => self.config.mode == Mode::Launch }),
+            Request::Close => {
+                if self.config.mode == Mode::Attach {
+                    self.remove_probes().await;
+                }
+                Ok(fields! { "closed" => self.config.mode == Mode::Launch })
+            }
             Request::Targets { select } => self.targets_cmd(select.as_deref()).await,
             Request::Eval {
                 expression,
@@ -76,6 +81,40 @@ impl State {
                 self.key_cmd(chord, into.as_deref(), require_focus.as_deref())
                     .await
             }
+            Request::Hold {
+                chord,
+                count,
+                interval_ms,
+                into,
+                require_focus,
+            } => {
+                self.hold_cmd(
+                    chord,
+                    *count,
+                    *interval_ms,
+                    into.as_deref(),
+                    require_focus.as_deref(),
+                )
+                .await
+            }
+            Request::MeasureStart {
+                watch,
+                watch_attr,
+                long_frame_ms,
+                over_ms,
+            } => {
+                self.measure_start_cmd(
+                    watch.as_deref(),
+                    watch_attr.as_deref(),
+                    *long_frame_ms,
+                    *over_ms,
+                )
+                .await
+            }
+            Request::MeasureStop {
+                quiet_ms,
+                ceiling_ms,
+            } => self.measure_stop_cmd(*quiet_ms, *ceiling_ms).await,
             Request::Wait {
                 selector,
                 text,
@@ -374,7 +413,7 @@ impl State {
 
     /// Resolves `into` when given, checks the focus guard before anything changes, then focuses it;
     /// without `into`, checks that the current focus holds. Returns the page to send input to.
-    async fn focus_for_input(
+    pub(super) async fn focus_for_input(
         &self,
         into: Option<&str>,
         require_focus: Option<&str>,
@@ -436,6 +475,7 @@ impl State {
             }
         };
         let mouse = |kind: &str, button: &str, count: i64| json!({ "type": kind, "x": x, "y": y, "button": button, "clickCount": count });
+        let mut sent = vec![Instant::now()];
         cdp.call("Input.dispatchMouseEvent", mouse("mouseMoved", "none", 0))
             .await?;
         let action = if how.hover {
@@ -444,8 +484,10 @@ impl State {
             let button = if how.right { "right" } else { "left" };
             let count = if how.double { 2 } else { 1 };
             for n in 1..=count {
+                sent.push(Instant::now());
                 cdp.call("Input.dispatchMouseEvent", mouse("mousePressed", button, n))
                     .await?;
+                sent.push(Instant::now());
                 cdp.call(
                     "Input.dispatchMouseEvent",
                     mouse("mouseReleased", button, n),
@@ -458,7 +500,7 @@ impl State {
                 _ => "click",
             }
         };
-        Ok(fields! { "action" => action, "x" => x, "y" => y })
+        Ok(self.stamp(fields! { "action" => action, "x" => x, "y" => y }, &sent))
     }
 
     async fn type_cmd(
@@ -471,6 +513,7 @@ impl State {
         let cdp = self.focus_for_input(into, require_focus).await?;
         let mut keyed = 0;
         let mut inserted = 0;
+        let mut sent = Vec::new();
         for c in text.chars() {
             let press = if c == '\n' {
                 chord::parse_chord("Enter").ok()
@@ -479,19 +522,19 @@ impl State {
             };
             match press {
                 Some(p) => {
-                    send_key(&cdp, &p).await?;
+                    send_key(&cdp, &p, &mut sent).await?;
                     keyed += 1;
                 }
                 None => {
+                    sent.push(Instant::now());
                     cdp.call("Input.insertText", json!({ "text": c.to_string() }))
                         .await?;
                     inserted += 1;
                 }
             }
         }
-        Ok(
-            fields! { "typed_chars" => keyed + inserted, "key_events" => keyed, "inserted_chars" => inserted },
-        )
+        let f = fields! { "typed_chars" => keyed + inserted, "key_events" => keyed, "inserted_chars" => inserted };
+        Ok(self.stamp(f, &sent))
     }
 
     async fn key_cmd(
@@ -502,8 +545,11 @@ impl State {
     ) -> Outcome {
         let press = chord::parse_chord(chord).map_err(|e| Failure::new(Kind::Error, e))?;
         let cdp = self.focus_for_input(into, require_focus).await?;
-        send_key(&cdp, &press).await?;
-        Ok(fields! { "key" => press.key, "code" => press.code, "modifiers" => press.modifiers })
+        let mut sent = Vec::new();
+        send_key(&cdp, &press, &mut sent).await?;
+        let f =
+            fields! { "key" => press.key, "code" => press.code, "modifiers" => press.modifiers };
+        Ok(self.stamp(f, &sent))
     }
 
     async fn wait_cmd(&self, condition: Option<Condition<'_>>, timeout_ms: u64) -> Outcome {
@@ -600,24 +646,13 @@ enum Condition<'a> {
     Expr(&'a str),
 }
 
-async fn send_key(cdp: &Cdp, p: &KeyPress) -> Result<(), Failure> {
-    let mut down = json!({
-        "type": if p.text.is_some() { "keyDown" } else { "rawKeyDown" },
-        "key": p.key,
-        "code": p.code,
-        "windowsVirtualKeyCode": p.vk,
-        "modifiers": p.modifiers,
-    });
-    if let Some(t) = &p.text {
-        down["text"] = json!(t);
-        down["unmodifiedText"] = json!(t);
-    }
-    cdp.call("Input.dispatchKeyEvent", down).await?;
-    cdp.call(
-        "Input.dispatchKeyEvent",
-        json!({ "type": "keyUp", "key": p.key, "code": p.code, "windowsVirtualKeyCode": p.vk, "modifiers": p.modifiers }),
-    )
-    .await?;
+/// Presses and releases `p`, noting when each event was sent.
+async fn send_key(cdp: &Cdp, p: &KeyPress, sent: &mut Vec<Instant>) -> Result<(), Failure> {
+    sent.push(Instant::now());
+    cdp.call("Input.dispatchKeyEvent", p.down_event(false))
+        .await?;
+    sent.push(Instant::now());
+    cdp.call("Input.dispatchKeyEvent", p.up_event()).await?;
     Ok(())
 }
 
@@ -649,7 +684,11 @@ pub(super) async fn evaluate(cdp: &Cdp, expr: &str) -> Result<Value, Failure> {
     evaluate_within(cdp, expr, Duration::from_secs(15)).await
 }
 
-async fn evaluate_within(cdp: &Cdp, expr: &str, timeout: Duration) -> Result<Value, Failure> {
+pub(super) async fn evaluate_within(
+    cdp: &Cdp,
+    expr: &str,
+    timeout: Duration,
+) -> Result<Value, Failure> {
     let params = json!({ "expression": expr, "returnByValue": true, "awaitPromise": true });
     let r = cdp
         .call_timeout("Runtime.evaluate", params, timeout)

@@ -3,9 +3,11 @@
 mod cdp;
 mod chord;
 mod client;
+mod clock;
 mod devtools;
 mod doctor;
 mod home;
+mod measure;
 mod output;
 mod proc;
 mod redact;
@@ -34,6 +36,34 @@ struct Cli {
     timeout: u64,
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Subcommand)]
+enum MeasureAction {
+    /// Install the frame and keydown probes, and a mutation probe on `--watch`.
+    Start {
+        /// An element whose changes are counted.
+        #[arg(long)]
+        watch: Option<String>,
+        /// Count only changes to this attribute of the watched element.
+        #[arg(long)]
+        watch_attr: Option<String>,
+        /// Milliseconds; a longer frame keeps the page from counting as settled.
+        #[arg(long, default_value_t = 25.0)]
+        long_frame: f64,
+        /// Milliseconds; frames longer than this are counted.
+        #[arg(long, default_value_t = 50.0)]
+        over: f64,
+    },
+    /// Wait for the page to settle, then report what the probes saw and remove them.
+    Stop {
+        /// Milliseconds without a long frame or a key for the page to count as settled.
+        #[arg(long, default_value_t = 1000)]
+        quiet: u64,
+        /// Milliseconds to wait for that before reporting the page unsettled.
+        #[arg(long, default_value_t = 10_000)]
+        ceiling: u64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -121,6 +151,24 @@ enum Command {
         into: Option<String>,
         #[arg(long)]
         require_focus: Option<String>,
+    },
+    /// Send N key-downs at a fixed interval without waiting for the page, then one key-up.
+    Hold {
+        chord: String,
+        #[arg(long)]
+        count: u32,
+        /// Milliseconds between key-downs.
+        #[arg(long, default_value_t = 33)]
+        interval: u64,
+        #[arg(long)]
+        into: Option<String>,
+        #[arg(long)]
+        require_focus: Option<String>,
+    },
+    /// Probe frames, keys and an optional element between `measure start` and `measure stop`.
+    Measure {
+        #[command(subcommand)]
+        action: MeasureAction,
     },
     /// Block until an element appears, a text is on the page, or an expression is true.
     Wait {
@@ -341,6 +389,39 @@ fn dispatch(cli: Cli) -> (String, i32, Value) {
             chord,
             into,
             require_focus,
+        },
+        Command::Hold {
+            chord,
+            count,
+            interval,
+            into,
+            require_focus,
+        } => Request::Hold {
+            chord,
+            count,
+            interval_ms: interval,
+            into,
+            require_focus,
+        },
+        Command::Measure {
+            action:
+                MeasureAction::Start {
+                    watch,
+                    watch_attr,
+                    long_frame,
+                    over,
+                },
+        } => Request::MeasureStart {
+            watch,
+            watch_attr,
+            long_frame_ms: long_frame,
+            over_ms: over,
+        },
+        Command::Measure {
+            action: MeasureAction::Stop { quiet, ceiling },
+        } => Request::MeasureStop {
+            quiet_ms: quiet,
+            ceiling_ms: ceiling,
         },
         Command::Wait {
             selector,

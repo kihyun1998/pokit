@@ -5,3 +5,4 @@ brings hand-written notes into its format.
 - [Launching a test instance](launching-a-test-instance.md)
 - [Starting the session process](starting-the-session-process.md)
 - [Sending input over CDP](sending-input-over-cdp.md)
+- [Measuring the page](measuring-the-page.md)

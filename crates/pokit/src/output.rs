@@ -16,6 +16,7 @@ pub enum Kind {
     Unsupported,
     SessionExists,
     JsError,
+    Reloaded,
 }
 
 impl Kind {
@@ -32,10 +33,12 @@ impl Kind {
             Kind::Unsupported => "unsupported",
             Kind::SessionExists => "session_exists",
             Kind::JsError => "js_error",
+            Kind::Reloaded => "page_reloaded",
         }
     }
 
-    /// 0 success, 1 error, 2 usage, 3 check failed, 4 timeout, 5 not found, 6 guard refused, 7 unsupported.
+    /// 0 success, 1 error, 2 usage, 3 check failed, 4 timeout, 5 not found, 6 guard refused, 7 unsupported,
+    /// 8 page reloaded mid-run.
     pub fn exit_code(self) -> i32 {
         match self {
             Kind::Error | Kind::SessionExists | Kind::JsError => 1,
@@ -45,6 +48,7 @@ impl Kind {
             Kind::NotFound | Kind::StaleRef | Kind::NoSession => 5,
             Kind::GuardRefused => 6,
             Kind::Unsupported => 7,
+            Kind::Reloaded => 8,
         }
     }
 }

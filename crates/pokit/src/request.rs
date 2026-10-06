@@ -3,6 +3,9 @@
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+/// How long `hold` waits for the page to acknowledge its keys after sending the last one.
+pub const HOLD_ACK_WAIT: Duration = Duration::from_secs(15);
+
 /// One command for the session, with its arguments.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "command", content = "args", rename_all = "snake_case")]
@@ -37,6 +40,23 @@ pub enum Request {
         into: Option<String>,
         require_focus: Option<String>,
     },
+    Hold {
+        chord: String,
+        count: u32,
+        interval_ms: u64,
+        into: Option<String>,
+        require_focus: Option<String>,
+    },
+    MeasureStart {
+        watch: Option<String>,
+        watch_attr: Option<String>,
+        long_frame_ms: f64,
+        over_ms: f64,
+    },
+    MeasureStop {
+        quiet_ms: u64,
+        ceiling_ms: u64,
+    },
     Wait {
         selector: Option<String>,
         text: Option<String>,
@@ -69,6 +89,9 @@ pub enum CommandKind {
     Click,
     Type,
     Key,
+    Hold,
+    MeasureStart,
+    MeasureStop,
     Wait,
     Capture,
     Logs,
@@ -88,6 +111,9 @@ impl Request {
             Request::Click { .. } => CommandKind::Click,
             Request::Type { .. } => CommandKind::Type,
             Request::Key { .. } => CommandKind::Key,
+            Request::Hold { .. } => CommandKind::Hold,
+            Request::MeasureStart { .. } => CommandKind::MeasureStart,
+            Request::MeasureStop { .. } => CommandKind::MeasureStop,
             Request::Wait { .. } => CommandKind::Wait,
             Request::Capture { .. } => CommandKind::Capture,
             Request::Logs { .. } => CommandKind::Logs,
@@ -102,6 +128,13 @@ impl Request {
             Request::Wait { timeout_ms, .. } | Request::Eval { timeout_ms, .. } => {
                 Duration::from_millis(*timeout_ms)
             }
+            Request::Hold {
+                count, interval_ms, ..
+            } => Duration::from_millis(u64::from(*count) * interval_ms) + HOLD_ACK_WAIT,
+            Request::MeasureStop {
+                quiet_ms,
+                ceiling_ms,
+            } => Duration::from_millis(quiet_ms + ceiling_ms),
             _ => Duration::ZERO,
         }
     }
@@ -130,6 +163,9 @@ impl CommandKind {
             CommandKind::Click => "click",
             CommandKind::Type => "type",
             CommandKind::Key => "key",
+            CommandKind::Hold => "hold",
+            CommandKind::MeasureStart => "measure_start",
+            CommandKind::MeasureStop => "measure_stop",
             CommandKind::Wait => "wait",
             CommandKind::Capture => "capture",
             CommandKind::Logs => "logs",
@@ -145,6 +181,7 @@ impl CommandKind {
             | CommandKind::Click
             | CommandKind::Type
             | CommandKind::Key
+            | CommandKind::Hold
             | CommandKind::Wait
             | CommandKind::Eval
             | CommandKind::Snapshot => true,
@@ -152,6 +189,8 @@ impl CommandKind {
             | CommandKind::Status
             | CommandKind::Close
             | CommandKind::Targets
+            | CommandKind::MeasureStart
+            | CommandKind::MeasureStop
             | CommandKind::Capture
             | CommandKind::Logs
             | CommandKind::Doctor => false,
@@ -165,11 +204,14 @@ impl CommandKind {
             | CommandKind::Click
             | CommandKind::Type
             | CommandKind::Key
+            | CommandKind::Hold
             | CommandKind::Capture => true,
             CommandKind::Ping
             | CommandKind::Status
             | CommandKind::Close
             | CommandKind::Targets
+            | CommandKind::MeasureStart
+            | CommandKind::MeasureStop
             | CommandKind::Snapshot
             | CommandKind::Wait
             | CommandKind::Logs
@@ -189,6 +231,9 @@ impl CommandKind {
             | CommandKind::Click
             | CommandKind::Type
             | CommandKind::Key
+            | CommandKind::Hold
+            | CommandKind::MeasureStart
+            | CommandKind::MeasureStop
             | CommandKind::Wait
             | CommandKind::Capture
             | CommandKind::Logs
@@ -232,6 +277,23 @@ mod tests {
                 chord: "Enter".into(),
                 into: None,
                 require_focus: None,
+            },
+            Request::Hold {
+                chord: "Ctrl+Equal".into(),
+                count: 3,
+                interval_ms: 33,
+                into: None,
+                require_focus: None,
+            },
+            Request::MeasureStart {
+                watch: None,
+                watch_attr: None,
+                long_frame_ms: 25.0,
+                over_ms: 50.0,
+            },
+            Request::MeasureStop {
+                quiet_ms: 1000,
+                ceiling_ms: 10_000,
             },
             Request::Wait {
                 selector: Some("#a".into()),

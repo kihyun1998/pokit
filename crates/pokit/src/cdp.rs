@@ -96,6 +96,11 @@ impl Cdp {
         params: Value,
         timeout: Duration,
     ) -> Result<Value, CdpError> {
+        self.send(method, params)?.wait(timeout).await
+    }
+
+    /// Sends `method` without waiting; its result is awaited later through the returned reply.
+    pub fn send(&self, method: &str, params: Value) -> Result<Reply, CdpError> {
         if self.is_closed() {
             return Err(CdpError::Closed(format!(
                 "{method}: the page's connection is closed"
@@ -111,18 +116,42 @@ impl Cdp {
                 "{method}: the page's connection is closed"
             )));
         }
-        match tokio::time::timeout(timeout, rx).await {
+        Ok(Reply {
+            id,
+            method: method.to_string(),
+            rx,
+            pending: self.pending.clone(),
+        })
+    }
+}
+
+/// The result of a command already sent.
+pub struct Reply {
+    id: u64,
+    method: String,
+    rx: oneshot::Receiver<Result<Value, String>>,
+    pending: Pending,
+}
+
+impl Reply {
+    /// Waits up to `timeout` for the result.
+    pub async fn wait(mut self, timeout: Duration) -> Result<Value, CdpError> {
+        let method = &self.method;
+        match tokio::time::timeout(timeout, &mut self.rx).await {
             Ok(Ok(Ok(v))) => Ok(v),
             Ok(Ok(Err(e))) => Err(CdpError::Protocol(format!("{method}: {e}"))),
             Ok(Err(_)) => Err(CdpError::Closed(format!("{method}: connection dropped"))),
-            Err(_) => {
-                self.pending.lock().unwrap().remove(&id);
-                Err(CdpError::Timeout(format!(
-                    "{method}: no answer within {}s",
-                    timeout.as_secs()
-                )))
-            }
+            Err(_) => Err(CdpError::Timeout(format!(
+                "{method}: no answer within {}s",
+                timeout.as_secs()
+            ))),
         }
+    }
+}
+
+impl Drop for Reply {
+    fn drop(&mut self) {
+        self.pending.lock().unwrap().remove(&self.id);
     }
 }
 

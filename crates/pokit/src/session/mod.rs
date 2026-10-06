@@ -4,6 +4,7 @@
 mod commands;
 mod launch;
 mod logs;
+mod measure;
 mod pages;
 mod record;
 
@@ -80,6 +81,10 @@ struct State {
     events_tx: mpsc::UnboundedSender<Event>,
     /// `performance.timeOrigin` of the main page when it became ready.
     main_origin: Mutex<Value>,
+    /// The latest alignment of the page clock with pokit's, and the target it was taken on.
+    clock: Mutex<Option<(String, crate::clock::Clock)>>,
+    /// The measurement between `measure start` and `measure stop`, if one is running.
+    measuring: Mutex<Option<measure::Measuring>>,
 }
 
 /// Runs the session process until `close`, idle timeout, or the launched app exits.
@@ -180,6 +185,8 @@ async fn serve(mut config: Config) {
         last_activity: Mutex::new(Instant::now()),
         events_tx,
         main_origin: Mutex::new(Value::Null),
+        clock: Mutex::default(),
+        measuring: Mutex::default(),
     });
 
     if let Some(child) = app.as_mut() {
@@ -213,6 +220,14 @@ async fn serve(mut config: Config) {
         return fail_start(pid, &config, None, e);
     }
 
+    if let Ok((target, cdp)) = state.current() {
+        if let Err(f) = state.align_clock(&target, &cdp).await {
+            let message = format!("clock alignment failed: {}", f.message);
+            state.log("session", "warning", "", message);
+        }
+    }
+
+    *state.last_activity.lock().unwrap() = Instant::now();
     info.status = Status::Ready;
     let _ = home::write_session(&info);
     let env_keys: Vec<&str> = config.env.iter().map(|(k, _)| k.as_str()).collect();
@@ -289,7 +304,7 @@ async fn serve(mut config: Config) {
             let _ = write.write_all(format!("{resp}\n").as_bytes()).await;
             let _ = write.flush().await;
             if closing {
-                st.shutdown();
+                st.shutdown().await;
             }
         });
     }
@@ -327,7 +342,7 @@ async fn watchdog(state: Arc<State>, app: Arc<tokio::sync::Mutex<Option<tokio::p
                 "",
                 format!("idle for {}s; ending the session", idle.as_secs()),
             );
-            state.shutdown();
+            state.shutdown().await;
         }
         if let Some(child) = app.lock().await.as_mut() {
             if let Ok(Some(_)) = child.try_wait() {
@@ -337,7 +352,7 @@ async fn watchdog(state: Arc<State>, app: Arc<tokio::sync::Mutex<Option<tokio::p
                     "",
                     "the launched app exited; ending the session".into(),
                 );
-                state.shutdown();
+                state.shutdown().await;
             }
         }
     }
@@ -356,7 +371,11 @@ impl State {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    fn shutdown(&self) -> ! {
+    /// Ends the session: removes probes left in an attached app, closes a launched one, and exits.
+    async fn shutdown(&self) -> ! {
+        if self.config.mode == Mode::Attach {
+            self.remove_probes().await;
+        }
         home::remove_session_if(std::process::id());
         let mut ended = json!({ "mode": self.config.mode.name() });
         if self.config.mode == Mode::Launch {
@@ -391,6 +410,7 @@ impl State {
             "record_dir" => self.record_dir.display().to_string(),
             "idle_timeout_secs" => self.config.idle_timeout_secs,
             "main" => json!({ "id": main, "title": title, "url": url, "time_origin": *self.main_origin.lock().unwrap() }),
+            "clock" => self.clock_json(),
         }
     }
 }
