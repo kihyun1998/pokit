@@ -217,3 +217,18 @@ pub fn top_level_at(x: i32, y: i32) -> isize {
     // SAFETY: both calls take plain values and return handles.
     unsafe { GetAncestor(WindowFromPoint(x, y), GA_ROOT) as isize }
 }
+
+/// The process ids from `pid` up through its parents, read with PowerShell.
+pub fn ancestors(pid: u32) -> Vec<u32> {
+    let script = format!(
+        "$p = {pid}; $ids = @(); for ($i = 0; $i -lt 32 -and $p; $i++) {{ $ids += $p;          $c = Get-CimInstance Win32_Process -Filter \"ProcessId=$p\"; if (-not $c) {{ break }};          $p = $c.ParentProcessId }}; $ids -join ' '"
+    );
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", &script])
+        .output()
+        .expect("powershell did not start");
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .filter_map(|s| s.parse().ok())
+        .collect()
+}

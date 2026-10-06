@@ -7,7 +7,7 @@
   "app": {
     "withGlobalTauri": true,
     "windows": [
-      { "label": "main", "title": "pokit fixture", "url": "index.html", "width": 800, "height": 600 }
+      { "label": "main", "title": "pokit fixture", "url": "index.html", "width": 800, "height": 600, "focus": false }
     ],
     "security": { "csp": null }
   },

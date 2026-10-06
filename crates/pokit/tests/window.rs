@@ -46,14 +46,36 @@ fn assert_still_rendering(what: &str, m: &Value) {
     assert_eq!(m["keys"]["handled"], 10, "{what}: {m}");
 }
 
+/// Whether this test descends from the foreground app, so that a launch could take the
+/// foreground at all; says why not when it does not.
+fn can_take_foreground(test: &str) -> bool {
+    let owner = window::window_pid(window::foreground());
+    let can = window::ancestors(std::process::id()).contains(&owner);
+    if !can {
+        eprintln!(
+            "{test}: the foreground app (pid {owner}) did not start this test, so launch could              not take the foreground either way; run it from the terminal in front to test anything"
+        );
+    }
+    can
+}
+
+/// Windows passes the right to take the foreground down from the foreground process to the
+/// processes it starts, so `launch` can only take it when this test descends from the
+/// foreground app, as it does when run from the terminal the user is looking at. Both cases run
+/// in this one test, because one launch taking the foreground would fail the other's check.
 #[test]
-fn launch_leaves_the_foreground_window_alone() {
+fn launch_leaves_the_foreground_where_it_was() {
     let before = window::foreground();
     assert_ne!(
         before, 0,
         "no window is in the foreground, so there is nothing to keep"
     );
+    if !can_take_foreground("launch_leaves_the_foreground_where_it_was") {
+        return;
+    }
+
     let p = Pokit::launch_fixture("window-focus");
+    std::thread::sleep(Duration::from_millis(1500));
     let after = window::foreground();
     assert_eq!(
         after,
@@ -62,6 +84,35 @@ fn launch_leaves_the_foreground_window_alone() {
         window::window_pid(after)
     );
     assert_ne!(window::window_pid(after), p.app_pid());
+    drop(p);
+
+    let mut p = Pokit::new("window-take-focus");
+    let exe = fixture_exe().to_str().unwrap().to_string();
+    let r = p.run(&["launch", &exe, "--", "--take-focus"]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    p.launched = Some(r.out.clone());
+    std::thread::sleep(Duration::from_millis(1500));
+    let given = r.out["foreground_given_back"].as_u64().unwrap_or(0);
+    let refused = r.out["foreground_give_back_refused"].as_u64().unwrap_or(0);
+    assert!(
+        given + refused >= 1,
+        "the app never took the foreground, so this proved nothing: {}",
+        r.out
+    );
+    let after = window::foreground();
+    if refused > 0 && after != before {
+        eprintln!(
+            "launch_leaves_the_foreground_where_it_was: Windows refused to give the foreground              back {refused} times (the user's input withdraws the right); best effort, not a failure"
+        );
+        return;
+    }
+    assert_eq!(
+        after,
+        before,
+        "an app that took the foreground kept it (now pid {}); launch: {}",
+        window::window_pid(after),
+        r.out
+    );
 }
 
 #[test]
