@@ -49,6 +49,72 @@ fn set_webview_visible(window: &tauri::WebviewWindow, visible: bool) {
 #[cfg(not(windows))]
 fn set_webview_visible(_window: &tauri::WebviewWindow, _visible: bool) {}
 
+/// Writes `text` into the page's native-result line.
+fn show_native_result(app: &tauri::AppHandle, text: &str) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.eval(format!(
+            "document.querySelector('#native-result').textContent = {text:?}"
+        ));
+    }
+}
+
+/// The main window's menu: File > Say hello, a disabled item, and Help > Ask, which asks a
+/// yes-or-no question in a native dialog.
+fn native_menu(app: &tauri::App) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
+    let hello = MenuItemBuilder::with_id("hello", "Say &hello")
+        .accelerator("Ctrl+H")
+        .build(app)?;
+    let off = MenuItemBuilder::with_id("off", "Not now")
+        .enabled(false)
+        .build(app)?;
+    let ask = MenuItemBuilder::with_id("ask", "&Ask").build(app)?;
+    let file = SubmenuBuilder::new(app, "&File")
+        .item(&hello)
+        .separator()
+        .item(&off)
+        .build()?;
+    let help = SubmenuBuilder::new(app, "&Help").item(&ask).build()?;
+    MenuBuilder::new(app).items(&[&file, &help]).build()
+}
+
+/// Asks "Proceed?" with Yes and No in a native dialog owned by the main window, and shows the
+/// answer on the page.
+#[cfg(windows)]
+fn ask_in_a_dialog(app: tauri::AppHandle) {
+    use windows::core::w;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, IDYES, MB_YESNO};
+    let owner = app
+        .get_webview_window("main")
+        .and_then(|w| w.hwnd().ok())
+        .map(|h| h.0 as isize)
+        .unwrap_or(0);
+    std::thread::spawn(move || {
+        // SAFETY: both strings are static and NUL-terminated; the owner may be gone, which only
+        // makes the dialog ownerless.
+        let answer = unsafe {
+            MessageBoxW(
+                Some(HWND(owner as *mut core::ffi::c_void)),
+                w!("Proceed?"),
+                w!("pokit fixture question"),
+                MB_YESNO,
+            )
+        };
+        show_native_result(
+            &app,
+            if answer == IDYES {
+                "answered yes"
+            } else {
+                "answered no"
+            },
+        );
+    });
+}
+
+#[cfg(not(windows))]
+fn ask_in_a_dialog(_app: tauri::AppHandle) {}
+
 /// Prints every key WebView2 raises through `AcceleratorKeyPressed` on the main window.
 #[cfg(windows)]
 fn log_accelerator_keys(window: &tauri::WebviewWindow) {
@@ -90,6 +156,15 @@ fn main() {
             if let Some(window) = app.get_webview_window("main") {
                 log_accelerator_keys(&window);
             }
+            let menu = native_menu(app)?;
+            if let Some(window) = app.get_webview_window("main") {
+                window.set_menu(menu)?;
+            }
+            app.on_menu_event(|app, event| match event.id().as_ref() {
+                "hello" => show_native_result(app, "hello from the menu"),
+                "ask" => ask_in_a_dialog(app.clone()),
+                _ => {}
+            });
             if std::env::args().any(|a| a == "--take-focus") {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.set_focus();

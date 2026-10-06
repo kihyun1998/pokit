@@ -114,6 +114,21 @@ impl State {
                 .await
             }
             #[cfg(windows)]
+            Request::NativeList => self.native_list_cmd().await,
+            #[cfg(windows)]
+            Request::NativeChoose { path } => self.native_choose_cmd(path).await,
+            #[cfg(windows)]
+            Request::NativeAnswer { button, dialog } => {
+                self.native_answer_cmd(button, dialog.as_deref()).await
+            }
+            #[cfg(not(windows))]
+            Request::NativeList | Request::NativeChoose { .. } | Request::NativeAnswer { .. } => {
+                Err(Failure::new(
+                    Kind::Unsupported,
+                    "native UI is not built on this platform yet",
+                ))
+            }
+            #[cfg(windows)]
             Request::ClipboardRead => self.clipboard_read_cmd().await,
             #[cfg(windows)]
             Request::ClipboardWrite { text, .. } => self.clipboard_write_cmd(text).await,

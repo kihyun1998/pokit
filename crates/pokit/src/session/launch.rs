@@ -49,22 +49,22 @@ pub(super) fn spawn_app(config: &Config) -> Result<(tokio::process::Child, PathB
     Ok((child, dir))
 }
 
-/// While `launching` holds, gives the foreground back to the window that had it before the
-/// launch whenever the app takes it; returns how many times it did, and how many times Windows
-/// refused.
+/// While `still()` holds, gives the foreground back to the window that had it before whenever
+/// the app takes it; `during` names what pokit was doing, for the log. Returns how many times it
+/// gave it back, and how many times Windows refused.
 #[cfg(windows)]
 pub(super) async fn keep_foreground(
     state: Arc<State>,
     app_pid: u32,
     before: (isize, u32),
-    launching: Arc<std::sync::atomic::AtomicBool>,
+    during: &'static str,
+    still: impl Fn() -> bool,
 ) -> (u32, u32) {
-    use std::sync::atomic::Ordering;
     let (mut gave_back, mut refused) = (0, 0);
     if before.0 == 0 || before.1 == app_pid {
         return (0, 0);
     }
-    while launching.load(Ordering::SeqCst) {
+    while still() {
         if crate::proc::foreground().1 == app_pid {
             let ok = crate::proc::set_foreground(before.0);
             if ok {
@@ -77,7 +77,7 @@ pub(super) async fn keep_foreground(
                 "info",
                 "",
                 format!(
-                    "the app took the foreground during launch; {} it back to pid {}",
+                    "the app took the foreground {during}; {} it back to pid {}",
                     if ok { "gave" } else { "could not give" },
                     before.1
                 ),

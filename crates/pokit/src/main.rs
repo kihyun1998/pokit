@@ -10,6 +10,7 @@ mod doctor;
 mod hangul;
 mod home;
 mod measure;
+mod native;
 mod output;
 mod plugin;
 mod proc;
@@ -69,6 +70,21 @@ enum MeasureAction {
         /// Milliseconds to wait for that before reporting the page unsettled.
         #[arg(long, default_value_t = 10_000)]
         ceiling: u64,
+    },
+}
+
+#[derive(Subcommand)]
+enum NativeAction {
+    /// The menu bars of the app's windows and the dialogs it has open.
+    List,
+    /// Choose a menu entry, written as a path: `File > Open`.
+    Choose { path: String },
+    /// Press a button in a dialog the app has open.
+    Answer {
+        button: String,
+        /// The dialog's title, when the app has more than one open.
+        #[arg(long)]
+        dialog: Option<String>,
     },
 }
 
@@ -215,6 +231,11 @@ enum Command {
     Measure {
         #[command(subcommand)]
         action: MeasureAction,
+    },
+    /// Read the launched app's menu bars and dialogs, choose a menu entry, or answer a dialog.
+    Native {
+        #[command(subcommand)]
+        action: NativeAction,
     },
     /// Read or write the clipboard's text; the user's clipboard is given back at `close`.
     Clipboard {
@@ -474,6 +495,15 @@ fn dispatch(cli: Cli) -> (String, i32, Value) {
             quiet_ms: quiet,
             ceiling_ms: ceiling,
         },
+        Command::Native {
+            action: NativeAction::List,
+        } => Request::NativeList,
+        Command::Native {
+            action: NativeAction::Choose { path },
+        } => Request::NativeChoose { path },
+        Command::Native {
+            action: NativeAction::Answer { button, dialog },
+        } => Request::NativeAnswer { button, dialog },
         Command::Clipboard {
             action: ClipboardAction::Read,
         } => Request::ClipboardRead,
