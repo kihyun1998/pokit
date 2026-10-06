@@ -17,8 +17,13 @@ impl State {
     #[cfg(windows)]
     pub(super) async fn clipboard_read_cmd(&self) -> Outcome {
         let owner = self.clipboard_owner()?;
-        let text = blocking(move || owner.read_text()).await?;
-        Ok(fields! { "text" => text })
+        Ok(match blocking(move || owner.read_text()).await? {
+            crate::clipboard::Read::Text(text) => fields! { "text" => text },
+            crate::clipboard::Read::Withheld => fields! {
+                "text" => serde_json::Value::Null,
+                "withheld" => "another program marked the clipboard as not for monitoring                                (ExcludeClipboardContentFromMonitorProcessing), as password managers do",
+            },
+        })
     }
 
     #[cfg(windows)]

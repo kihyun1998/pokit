@@ -47,6 +47,15 @@ impl Drop for KeepClipboard {
     }
 }
 
+/// Puts text on the clipboard marked as not for monitoring, as a password manager does.
+fn set_clipboard_text_not_for_monitoring(text: &str) {
+    powershell(&format!(
+        "Add-Type -AssemblyName System.Windows.Forms;          $d = New-Object Windows.Forms.DataObject;          $d.SetText('{}');          $d.SetData('ExcludeClipboardContentFromMonitorProcessing',                     (New-Object IO.MemoryStream(,[byte[]](0,0,0,0))));          [Windows.Forms.Clipboard]::SetDataObject($d, $true)",
+        text.replace('\'', "''")
+    ));
+    assert_eq!(clipboard_text(), text, "could not set the clipboard");
+}
+
 #[test]
 fn the_clipboard_is_written_pasted_kept_out_of_history_and_given_back() {
     let _keep = KeepClipboard(clipboard_text());
@@ -54,6 +63,16 @@ fn the_clipboard_is_written_pasted_kept_out_of_history_and_given_back() {
     set_clipboard_text(&before);
 
     let p = Pokit::launch_fixture("clipboard");
+    set_clipboard_text_not_for_monitoring("hunter2-from-a-password-manager");
+    let r = p.run(&["clipboard", "read"]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert_eq!(r.out["text"], serde_json::Value::Null, "{}", r.out);
+    assert!(r.out["withheld"].is_string(), "{}", r.out);
+    assert!(
+        !p.all_written_text().contains("hunter2"),
+        "a clipboard marked not for monitoring reached the run record"
+    );
+    set_clipboard_text(&before);
     let text = "pokit 한글 ✓";
     let r = p.run(&["clipboard", "write", text]);
     assert_eq!(r.code, 0, "{}", r.out);

@@ -1,5 +1,14 @@
 //! The Windows clipboard: reading and writing text, and saving and restoring whatever it held.
 
+/// What `read_text` found.
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Debug, PartialEq)]
+pub enum Read {
+    Text(Option<String>),
+    /// Another program marked the clipboard as not for monitoring, as password managers do.
+    Withheld,
+}
+
 /// One clipboard format and its bytes.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub type Item = (u32, Vec<u8>);
@@ -193,14 +202,23 @@ mod win {
         }
 
         /// The clipboard's text, if it holds any.
-        pub fn read_text(&self) -> Result<Option<String>, String> {
-            self.run(|hwnd, _| {
+        /// Withheld when another program marked the clipboard as not for monitoring; what
+        /// pokit wrote itself is always read.
+        pub fn read_text(&self) -> Result<super::Read, String> {
+            self.run(|hwnd, saved| {
                 let _open = Open::new(hwnd)?;
+                let ours = saved.written == Some(sequence());
+                // SAFETY: the clipboard is open.
+                if !ours && unsafe { IsClipboardFormatAvailable(exclude_format()) } != 0 {
+                    return Ok(super::Read::Withheld);
+                }
                 // SAFETY: the clipboard is open.
                 if unsafe { IsClipboardFormatAvailable(CF_UNICODETEXT) } == 0 {
-                    return Ok(None);
+                    return Ok(super::Read::Text(None));
                 }
-                Ok(read_format(CF_UNICODETEXT).map(|b| super::text_from_utf16(&b)))
+                Ok(super::Read::Text(
+                    read_format(CF_UNICODETEXT).map(|b| super::text_from_utf16(&b)),
+                ))
             })?
         }
 
@@ -272,10 +290,7 @@ mod win {
         }
         let mut failed = Vec::new();
         if !items.is_empty() {
-            let name: Vec<u16> = EXCLUDE.encode_utf16().chain(Some(0)).collect();
-            // SAFETY: `name` is NUL-terminated.
-            let exclude = unsafe { RegisterClipboardFormatW(name.as_ptr()) };
-            if let Err(e) = write_format(exclude, &0u32.to_le_bytes()) {
+            if let Err(e) = write_format(exclude_format(), &0u32.to_le_bytes()) {
                 failed.push(e);
             }
         }
@@ -292,6 +307,13 @@ mod win {
                 Err(failed.join("; "))
             },
         )
+    }
+
+    /// The registered format that keeps clipboard data out of history and cloud sync.
+    fn exclude_format() -> u32 {
+        let name: Vec<u16> = EXCLUDE.encode_utf16().chain(Some(0)).collect();
+        // SAFETY: `name` is NUL-terminated.
+        unsafe { RegisterClipboardFormatW(name.as_ptr()) }
     }
 
     /// The clipboard's sequence number, which changes whenever its contents do.
