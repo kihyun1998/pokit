@@ -6,3 +6,4 @@ brings hand-written notes into its format.
 - [Starting the session process](starting-the-session-process.md)
 - [Sending input over CDP](sending-input-over-cdp.md)
 - [Measuring the page](measuring-the-page.md)
+- [Tracing and profiling the page](tracing-and-profiling.md)

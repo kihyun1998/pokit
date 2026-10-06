@@ -6,6 +6,7 @@ mod launch;
 mod logs;
 mod measure;
 mod pages;
+mod profiling;
 mod record;
 
 use crate::cdp::{Cdp, Event};
@@ -85,6 +86,12 @@ struct State {
     clock: Mutex<Option<(String, crate::clock::Clock)>>,
     /// The measurement between `measure start` and `measure stop`, if one is running.
     measuring: Mutex<Option<measure::Measuring>>,
+    /// The trace between `trace start` and `trace stop`, if one is running.
+    tracing: Mutex<Option<profiling::Recording>>,
+    /// The CPU profile between `profile start` and `profile stop`, if one is running.
+    profiling: Mutex<Option<profiling::Recording>>,
+    /// Commands waiting for one event from one target.
+    waiters: Mutex<Vec<pages::Waiter>>,
 }
 
 /// Runs the session process until `close`, idle timeout, or the launched app exits.
@@ -187,6 +194,9 @@ async fn serve(mut config: Config) {
         main_origin: Mutex::new(Value::Null),
         clock: Mutex::default(),
         measuring: Mutex::default(),
+        tracing: Mutex::default(),
+        profiling: Mutex::default(),
+        waiters: Mutex::default(),
     });
 
     if let Some(child) = app.as_mut() {

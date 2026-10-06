@@ -6,6 +6,9 @@ use std::time::Duration;
 /// How long `hold` waits for the page to acknowledge its keys after sending the last one.
 pub const HOLD_ACK_WAIT: Duration = Duration::from_secs(15);
 
+/// How much longer than its own timeout the CLI waits for `trace stop`, which reads the trace.
+pub const TRACE_STOP_WAIT: Duration = Duration::from_secs(60);
+
 /// One command for the session, with its arguments.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "command", content = "args", rename_all = "snake_case")]
@@ -57,6 +60,14 @@ pub enum Request {
         quiet_ms: u64,
         ceiling_ms: u64,
     },
+    TraceStart,
+    TraceStop,
+    ProfileStart {
+        interval_us: u64,
+    },
+    ProfileStop {
+        top: usize,
+    },
     Wait {
         selector: Option<String>,
         text: Option<String>,
@@ -92,6 +103,10 @@ pub enum CommandKind {
     Hold,
     MeasureStart,
     MeasureStop,
+    TraceStart,
+    TraceStop,
+    ProfileStart,
+    ProfileStop,
     Wait,
     Capture,
     Logs,
@@ -114,6 +129,10 @@ impl Request {
             Request::Hold { .. } => CommandKind::Hold,
             Request::MeasureStart { .. } => CommandKind::MeasureStart,
             Request::MeasureStop { .. } => CommandKind::MeasureStop,
+            Request::TraceStart => CommandKind::TraceStart,
+            Request::TraceStop => CommandKind::TraceStop,
+            Request::ProfileStart { .. } => CommandKind::ProfileStart,
+            Request::ProfileStop { .. } => CommandKind::ProfileStop,
             Request::Wait { .. } => CommandKind::Wait,
             Request::Capture { .. } => CommandKind::Capture,
             Request::Logs { .. } => CommandKind::Logs,
@@ -135,6 +154,7 @@ impl Request {
                 quiet_ms,
                 ceiling_ms,
             } => Duration::from_millis(quiet_ms + ceiling_ms),
+            Request::TraceStop => TRACE_STOP_WAIT,
             _ => Duration::ZERO,
         }
     }
@@ -166,6 +186,10 @@ impl CommandKind {
             CommandKind::Hold => "hold",
             CommandKind::MeasureStart => "measure_start",
             CommandKind::MeasureStop => "measure_stop",
+            CommandKind::TraceStart => "trace_start",
+            CommandKind::TraceStop => "trace_stop",
+            CommandKind::ProfileStart => "profile_start",
+            CommandKind::ProfileStop => "profile_stop",
             CommandKind::Wait => "wait",
             CommandKind::Capture => "capture",
             CommandKind::Logs => "logs",
@@ -191,6 +215,10 @@ impl CommandKind {
             | CommandKind::Targets
             | CommandKind::MeasureStart
             | CommandKind::MeasureStop
+            | CommandKind::TraceStart
+            | CommandKind::TraceStop
+            | CommandKind::ProfileStart
+            | CommandKind::ProfileStop
             | CommandKind::Capture
             | CommandKind::Logs
             | CommandKind::Doctor => false,
@@ -212,6 +240,10 @@ impl CommandKind {
             | CommandKind::Targets
             | CommandKind::MeasureStart
             | CommandKind::MeasureStop
+            | CommandKind::TraceStart
+            | CommandKind::TraceStop
+            | CommandKind::ProfileStart
+            | CommandKind::ProfileStop
             | CommandKind::Snapshot
             | CommandKind::Wait
             | CommandKind::Logs
@@ -234,6 +266,10 @@ impl CommandKind {
             | CommandKind::Hold
             | CommandKind::MeasureStart
             | CommandKind::MeasureStop
+            | CommandKind::TraceStart
+            | CommandKind::TraceStop
+            | CommandKind::ProfileStart
+            | CommandKind::ProfileStop
             | CommandKind::Wait
             | CommandKind::Capture
             | CommandKind::Logs
@@ -295,6 +331,10 @@ mod tests {
                 quiet_ms: 1000,
                 ceiling_ms: 10_000,
             },
+            Request::TraceStart,
+            Request::TraceStop,
+            Request::ProfileStart { interval_us: 100 },
+            Request::ProfileStop { top: 20 },
             Request::Wait {
                 selector: Some("#a".into()),
                 text: None,
