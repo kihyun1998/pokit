@@ -84,9 +84,19 @@ pub fn key_for(jamo: char) -> Option<(&'static str, bool)> {
         .map(|(_, code, shift)| (*code, *shift))
 }
 
-/// Whether `c` is typed through the IME: a precomposed syllable or a jamo it can type.
+/// Whether `c` is typed through the IME: a precomposed syllable, or a lone jamo the IME types
+/// as itself. A compound final such as ㄳ is not: its two keys type ㄱ and ㅅ.
 pub fn is_composed(c: char) -> bool {
-    ('가'..='힣').contains(&c) || keys_for(c).iter().all(|k| key_for(*k).is_some())
+    if is_syllable(c) {
+        return true;
+    }
+    let keys = keys_for(c);
+    keys.iter().all(|k| key_for(*k).is_some()) && (keys.len() == 1 || is_vowel(c))
+}
+
+/// Whether `c` is a precomposed Hangul syllable.
+pub fn is_syllable(c: char) -> bool {
+    ('가'..='힣').contains(&c)
 }
 
 fn is_vowel(j: char) -> bool {
@@ -303,7 +313,8 @@ mod tests {
         assert_eq!(keys_for('닭'), vec!['ㄷ', 'ㅏ', 'ㄹ', 'ㄱ']);
         assert_eq!(keys_for('ㅘ'), vec!['ㅗ', 'ㅏ']);
         assert_eq!(keys_for('a'), vec!['a']);
-        assert!(is_composed('한') && is_composed('ㅘ') && !is_composed('a') && !is_composed('漢'));
+        assert!(is_composed('한') && is_composed('ㅘ') && is_composed('ㅋ'));
+        assert!(!is_composed('a') && !is_composed('漢') && !is_composed('ㄳ'));
     }
 
     #[test]

@@ -533,9 +533,27 @@ impl State {
         let mut ime = hangul::Composer::default();
         for c in text.chars() {
             if hangul::is_composed(c) {
+                if !hangul::is_syllable(c) {
+                    if let Some(rest) = ime.finish() {
+                        commit(&cdp, &rest, &mut sent).await?;
+                    }
+                }
                 for jamo in hangul::keys_for(c) {
                     let step = ime.press(jamo);
-                    send_ime_key(&cdp, jamo, step, &mut sent).await?;
+                    if let Err(e) = send_ime_key(&cdp, jamo, step, &mut sent).await {
+                        let _ = cdp
+                            .call(
+                                "Input.imeSetComposition",
+                                json!({ "text": "", "selectionStart": 0, "selectionEnd": 0 }),
+                            )
+                            .await;
+                        return Err(e);
+                    }
+                }
+                if !hangul::is_syllable(c) {
+                    if let Some(rest) = ime.finish() {
+                        commit(&cdp, &rest, &mut sent).await?;
+                    }
                 }
                 composed += 1;
                 continue;

@@ -1,10 +1,10 @@
 # Sending input over CDP
 
-How `click`, `type` and `key` reach the page on Windows, and what masking covers. Code: `session::commands::send_key`, `State::click_cmd` (session/commands.rs), `State::focus_for_input`, `State::guard_target`, `chord`, `redact`.
+How `click`, `type` and `key` reach the page on Windows, and what masking covers. Code: `session::commands::send_key`, `session::commands::send_ime_key`, `hangul`, `State::click_cmd` (session/commands.rs), `State::focus_for_input`, `State::guard_target`, `chord`, `redact`.
 
 - **`Input.dispatchKeyEvent` replies only after the renderer acknowledges the event.** It also focuses the target widget first. If the event never reaches an input observer, the reply comes at once and still says success. Source: `content/browser/devtools/protocol/input_handler.cc` (Chromium main, 2026-09-25), lines 776–797 and 835–848. A reply is therefore not proof of delivery; see the readiness trap in [[launching-a-test-instance]].
 - **Typed text goes key by key where the US layout has the character** (`keyDown` with `text`, then `keyUp`), through a 2-Set IME composition where it is Hangul, and through `Input.insertText` otherwise (other scripts, emoji). A newline, `\r` or `\r\n`, is one Enter press.
-- **Hangul is composed key by key, as a 2-Set (Dubeolsik) IME composes it.** Each syllable is split into the jamo keys a person presses (`hangul::keys_for`), and `hangul::Composer` runs them through the 2-Set rules. Compound vowels and finals build up over two keys. A final consonant moves to the next syllable when a vowel follows: typing 가나 shows 간 before it becomes 가 + 나. A compound final splits. For each key pokit sends:
+- **Hangul is composed key by key, as a 2-Set (Dubeolsik) IME composes it.** Each syllable is split into the jamo keys a person presses (`hangul::keys_for`), and `hangul::Composer` runs them through the 2-Set rules. Compound vowels and finals build up over two keys. A final consonant moves to the next syllable when a vowel follows: typing 가나 shows 간 before it becomes 가 + 나. A compound final splits. A lone jamo in the text (ㅋㅋ) is composed on its own: whatever is being composed is committed before it and after it, so it never joins its neighbours, though a real IME would join 가ㄴ into 간; a compound consonant jamo (ㄳ) has no key of its own and is inserted as text. When a CDP call fails mid-composition, the composition is cancelled before the error returns. For each key pokit sends:
   - a `Process` key-down (virtual key 229, with the physical key's `code`);
   - `Input.insertText` for any syllable the key commits;
   - `Input.imeSetComposition` for the composition left;
@@ -15,6 +15,8 @@ How `click`, `type` and `key` reach the page on Windows, and what masking covers
   - `compositionstart`, `compositionupdate` ㅎ 하 한, `compositionend` 한, then the same for ㄱ 그 글;
   - a `Process` key-down per key;
   - the value 한글, with the foreground window unchanged.
+
+  Typing 가나 gave `compositionupdate` ㄱ 가 간, `compositionend` 가, then 나.
 
   Blink sends one more `compositionupdate` with the committed text just before each `compositionend`.
 - **Chords use physical key names.** `key` and the virtual key code come from a US layout table. Modifier bits are Alt 1, Ctrl 2, Meta 4, Shift 8. `Ctrl+Equal` gives `key "=", code "Equal", vk 187, modifiers 2`, the same values penterm's held-size-key script sends. Modifiers travel as flags on the main key only. Playwright presses each modifier as its own key, so a page counting keydowns sees the two differently.
