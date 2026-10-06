@@ -52,7 +52,7 @@ impl Drop for KeepClipboard {
 /// Puts text on the clipboard marked as not for monitoring, as a password manager does.
 fn set_clipboard_text_not_for_monitoring(text: &str) {
     powershell(&format!(
-        "Add-Type -AssemblyName System.Windows.Forms;          $d = New-Object Windows.Forms.DataObject;          $d.SetText('{}');          $d.SetData('ExcludeClipboardContentFromMonitorProcessing',                     (New-Object IO.MemoryStream(,[byte[]](0,0,0,0))));          [Windows.Forms.Clipboard]::SetDataObject($d, $true)",
+        "Add-Type -AssemblyName System.Windows.Forms; $d = New-Object Windows.Forms.DataObject; $d.SetText('{}'); $d.SetData('ExcludeClipboardContentFromMonitorProcessing', (New-Object IO.MemoryStream(,[byte[]](0,0,0,0)))); [Windows.Forms.Clipboard]::SetDataObject($d, $true)",
         text.replace('\'', "''")
     ));
     assert_eq!(clipboard_text(), text, "could not set the clipboard");

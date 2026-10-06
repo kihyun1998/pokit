@@ -39,7 +39,7 @@ fn measure_with_keys(p: &Pokit) -> Value {
 fn assert_still_rendering(what: &str, m: &Value) {
     assert_eq!(
         m["hidden"]["was_hidden"], false,
-        "{what}: the page was hidden; WebView2 or wry now hides it, so update          docs/map/measuring-the-page.md: {m}"
+        "{what}: the page was hidden; WebView2 or wry now hides it, so update docs/map/measuring-the-page.md: {m}"
     );
     assert!(
         m["frames"]["count"].as_u64().unwrap() >= 30,
@@ -91,7 +91,7 @@ fn launch_leaves_the_foreground_where_it_was() {
     let after = window::foreground();
     if refused > 0 && after != before {
         eprintln!(
-            "launch_leaves_the_foreground_where_it_was: Windows refused to give the foreground              back {refused} times (the user's input withdraws the right); best effort, not a failure"
+            "launch_leaves_the_foreground_where_it_was: Windows refused to give the foreground back {refused} times (the user's input withdraws the right); best effort, not a failure"
         );
         return;
     }

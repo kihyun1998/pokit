@@ -221,7 +221,7 @@ pub fn top_level_at(x: i32, y: i32) -> isize {
 /// The process ids from `pid` up through its parents, read with PowerShell.
 pub fn ancestors(pid: u32) -> Vec<u32> {
     let script = format!(
-        "$p = {pid}; $ids = @(); for ($i = 0; $i -lt 32 -and $p; $i++) {{ $ids += $p;          $c = Get-CimInstance Win32_Process -Filter \"ProcessId=$p\"; if (-not $c) {{ break }};          $p = $c.ParentProcessId }}; $ids -join ' '"
+        "$p = {pid}; $ids = @(); for ($i = 0; $i -lt 32 -and $p; $i++) {{ $ids += $p; $c = Get-CimInstance Win32_Process -Filter \"ProcessId=$p\"; if (-not $c) {{ break }}; $p = $c.ParentProcessId }}; $ids -join ' '"
     );
     let out = std::process::Command::new("powershell")
         .args(["-NoProfile", "-Command", &script])
@@ -240,7 +240,7 @@ pub fn can_take_foreground(test: &str) -> bool {
     let can = ancestors(std::process::id()).contains(&owner);
     if !can {
         eprintln!(
-            "{test}: the foreground app (pid {owner}) did not start this test, so launch could              not take the foreground either way; run it from the terminal in front to test anything"
+            "{test}: the foreground app (pid {owner}) did not start this test, so launch could not take the foreground either way; run it from the terminal in front to test anything"
         );
     }
     can
