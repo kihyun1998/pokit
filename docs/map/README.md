@@ -8,3 +8,5 @@ brings hand-written notes into its format.
 - [Measuring the page](measuring-the-page.md)
 - [Tracing and profiling the page](tracing-and-profiling.md)
 - [Using the user's clipboard](using-the-clipboard.md)
+- [Sending input on macOS](sending-input-on-macos.md)
+- [Seeing the page on macOS](seeing-the-page-on-macos.md)
