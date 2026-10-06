@@ -56,10 +56,26 @@ fn the_menu_bar_is_read_and_its_entries_chosen() {
 
     let r = p.run(&["native", "choose", "File > Not now"]);
     assert_eq!(r.code, 1, "a disabled entry was chosen: {}", r.out);
+    assert!(
+        r.out["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("is disabled"),
+        "{}",
+        r.out
+    );
     let r = p.run(&["native", "choose", "File > Nothing like this"]);
     assert_eq!(r.code, 5, "{}", r.out);
     let r = p.run(&["native", "choose", "File"]);
     assert_eq!(r.code, 1, "a submenu was chosen as an entry: {}", r.out);
+    assert!(
+        r.out["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("opens a submenu"),
+        "{}",
+        r.out
+    );
 }
 
 #[test]
@@ -99,6 +115,21 @@ fn a_dialog_is_read_answered_and_closes_with_the_answer() {
     dialogs(&p, 0);
 
     assert_eq!(p.run(&["native", "choose", "Help > Ask"]).code, 0);
+    dialogs(&p, 1);
+    let r = p.run(&["native", "choose", "Help > Ask"]);
+    assert_eq!(
+        r.code, 1,
+        "a menu behind a modal dialog was chosen: {}",
+        r.out
+    );
+    assert!(
+        r.out["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("modal dialog"),
+        "{}",
+        r.out
+    );
     dialogs(&p, 1);
     let r = p.run(&["native", "answer", "Nothing like this"]);
     assert_eq!(r.code, 5, "{}", r.out);

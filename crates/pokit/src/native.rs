@@ -1,6 +1,8 @@
 //! An app's native UI on Windows: its menu bars, read and chosen through Win32, and its dialogs,
 //! read and answered through UI Automation.
 
+#![cfg_attr(not(windows), allow(dead_code))]
+
 use serde::Serialize;
 
 /// One menu entry, with its submenu.
@@ -106,9 +108,10 @@ pub struct Answered {
     pub closed: bool,
 }
 
-/// Why a menu entry was not chosen: no menu has it, or it cannot be chosen.
+/// Why a menu entry was not chosen or a dialog not answered: what was named is not there, or it
+/// is there and cannot be operated.
 #[derive(Debug)]
-pub enum NotChosen {
+pub enum Refusal {
     Missing(String),
     Refused(String),
 }
@@ -118,7 +121,7 @@ pub use win::{answer, choose, dialogs, menus};
 
 #[cfg(windows)]
 mod win {
-    use super::{Answered, Dialog, MenuItem, NotChosen};
+    use super::{Answered, Dialog, MenuItem, Refusal};
     use windows::core::PWSTR;
     use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
     use windows::Win32::System::Com::{
@@ -129,6 +132,7 @@ mod win {
         TreeScope_Descendants, UIA_ButtonControlTypeId, UIA_InvokePatternId, UIA_TextControlTypeId,
         UIA_TitleBarControlTypeId,
     };
+    use windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetClassNameW, GetDlgCtrlID, GetMenu, GetMenuItemCount, GetMenuItemInfoW,
         GetWindowTextW, GetWindowThreadProcessId, IsWindow, IsWindowVisible, PostMessageW,
@@ -228,21 +232,27 @@ mod win {
 
     /// Chooses the entry at `path` in the first menu bar of process `pid` that has it, the way
     /// clicking it would: a `WM_COMMAND` with its id, posted to its window.
-    pub fn choose(pid: u32, path: &[String]) -> Result<String, NotChosen> {
+    pub fn choose(pid: u32, path: &[String]) -> Result<String, Refusal> {
         for (title, menu, hwnd) in menus(pid) {
             let Some(item) = super::find(&menu, path) else {
                 continue;
             };
             if !item.items.is_empty() {
-                return Err(NotChosen::Refused(format!(
+                return Err(Refusal::Refused(format!(
                     "`{}` opens a submenu; choose an entry in it",
                     path.join(" > ")
                 )));
             }
             if !item.enabled {
-                return Err(NotChosen::Refused(format!(
+                return Err(Refusal::Refused(format!(
                     "`{}` is disabled",
                     path.join(" > ")
+                )));
+            }
+            // SAFETY: a plain query on a window of the app.
+            if !unsafe { IsWindowEnabled(HWND(hwnd as *mut core::ffi::c_void)) }.as_bool() {
+                return Err(Refusal::Refused(format!(
+                    "\"{title}\" is disabled, most likely behind a modal dialog; answer that first"
                 )));
             }
             // SAFETY: posts to a live window of the app; nothing is borrowed.
@@ -254,10 +264,10 @@ mod win {
                     LPARAM(0),
                 )
             }
-            .map_err(|e| NotChosen::Refused(format!("could not post the menu command: {e}")))?;
+            .map_err(|e| Refusal::Refused(format!("could not post the menu command: {e}")))?;
             return Ok(title);
         }
-        Err(NotChosen::Missing(format!(
+        Err(Refusal::Missing(format!(
             "no menu has `{}`",
             path.join(" > ")
         )))
@@ -294,29 +304,33 @@ mod win {
                 continue;
             }
             let (mut text, mut buttons) = (Vec::new(), Vec::new());
-            // SAFETY: `hwnd` is a live window; every COM call is checked.
-            unsafe {
-                let root = uia.ElementFromHandle(hwnd).map_err(|e| e.to_string())?;
-                let all = root
-                    .FindAll(
-                        TreeScope_Descendants,
-                        &uia.CreateTrueCondition().map_err(|e| e.to_string())?,
-                    )
-                    .map_err(|e| e.to_string())?;
-                for i in 0..all.Length().unwrap_or(0) {
-                    let Ok(el) = all.GetElement(i) else { continue };
-                    if in_title_bar(&uia, &el) {
-                        continue;
-                    }
-                    let name = el.CurrentName().map(|b| b.to_string()).unwrap_or_default();
-                    match el.CurrentControlType() {
-                        Ok(t) if t == UIA_ButtonControlTypeId && !name.is_empty() => {
-                            buttons.push(name)
+            // SAFETY: `hwnd` was a live window when listed; every COM call is checked, and a
+            // dialog that closes meanwhile is left out.
+            let read = unsafe {
+                (|| -> windows::core::Result<()> {
+                    let root = uia.ElementFromHandle(hwnd)?;
+                    let all = root.FindAll(TreeScope_Descendants, &uia.CreateTrueCondition()?)?;
+                    for i in 0..all.Length().unwrap_or(0) {
+                        let Ok(el) = all.GetElement(i) else { continue };
+                        if in_title_bar(&uia, &el) {
+                            continue;
                         }
-                        Ok(t) if t == UIA_TextControlTypeId && !name.is_empty() => text.push(name),
-                        _ => {}
+                        let name = el.CurrentName().map(|b| b.to_string()).unwrap_or_default();
+                        match el.CurrentControlType() {
+                            Ok(t) if t == UIA_ButtonControlTypeId && !name.is_empty() => {
+                                buttons.push(name)
+                            }
+                            Ok(t) if t == UIA_TextControlTypeId && !name.is_empty() => {
+                                text.push(name)
+                            }
+                            _ => {}
+                        }
                     }
-                }
+                    Ok(())
+                })()
+            };
+            if read.is_err() {
+                continue;
             }
             out.push(Dialog {
                 title: window_text(hwnd),
@@ -334,15 +348,17 @@ mod win {
     /// through UI Automation's Invoke;
     /// returns the dialog's title, the button's full name, and whether the dialog closed within
     /// a second.
-    pub fn answer(pid: u32, button: &str, title: Option<&str>) -> Result<Answered, String> {
-        let uia = automation()?;
-        let open = dialogs(pid)?;
+    pub fn answer(pid: u32, button: &str, title: Option<&str>) -> Result<Answered, Refusal> {
+        let uia = automation().map_err(Refusal::Refused)?;
+        let open = dialogs(pid).map_err(Refusal::Refused)?;
         let dialog = open
             .iter()
             .find(|d| title.is_none_or(|t| d.title == t))
-            .ok_or_else(|| match title {
-                Some(t) => format!("no open dialog is titled `{t}`"),
-                None => "the app has no dialog open".to_string(),
+            .ok_or_else(|| {
+                Refusal::Missing(match title {
+                    Some(t) => format!("no open dialog is titled `{t}`"),
+                    None => "the app has no dialog open".to_string(),
+                })
             })?;
         let hwnd = HWND(dialog.hwnd as *mut core::ffi::c_void);
         // SAFETY: a null message to a window, with a timeout; it returns once the window's thread
@@ -360,13 +376,16 @@ mod win {
         };
         // SAFETY: the dialog's window was live when listed; every COM call is checked.
         unsafe {
-            let root = uia.ElementFromHandle(hwnd).map_err(|e| e.to_string())?;
+            let root = uia
+                .ElementFromHandle(hwnd)
+                .map_err(|e| Refusal::Refused(e.to_string()))?;
             let all = root
                 .FindAll(
                     TreeScope_Descendants,
-                    &uia.CreateTrueCondition().map_err(|e| e.to_string())?,
+                    &uia.CreateTrueCondition()
+                        .map_err(|e| Refusal::Refused(e.to_string()))?,
                 )
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| Refusal::Refused(e.to_string()))?;
             for i in 0..all.Length().unwrap_or(0) {
                 let Ok(el) = all.GetElement(i) else { continue };
                 if el.CurrentControlType() != Ok(UIA_ButtonControlTypeId) || in_title_bar(&uia, &el)
@@ -386,14 +405,15 @@ mod win {
                         WPARAM(id | (BN_CLICKED << 16)),
                         LPARAM(native.0 as isize),
                     )
-                    .map_err(|e| format!("pressing `{name}` failed: {e}"))?;
+                    .map_err(|e| Refusal::Refused(format!("pressing `{name}` failed: {e}")))?;
                 } else {
-                    let invoke: IUIAutomationInvokePattern = el
-                        .GetCurrentPatternAs(UIA_InvokePatternId)
-                        .map_err(|e| format!("`{name}` cannot be pressed: {e}"))?;
+                    let invoke: IUIAutomationInvokePattern =
+                        el.GetCurrentPatternAs(UIA_InvokePatternId).map_err(|e| {
+                            Refusal::Refused(format!("`{name}` cannot be pressed: {e}"))
+                        })?;
                     invoke
                         .Invoke()
-                        .map_err(|e| format!("pressing `{name}` failed: {e}"))?;
+                        .map_err(|e| Refusal::Refused(format!("pressing `{name}` failed: {e}")))?;
                 }
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
                 while IsWindow(Some(hwnd)).as_bool() && std::time::Instant::now() < deadline {
@@ -406,10 +426,10 @@ mod win {
                 });
             }
         }
-        Err(format!(
+        Err(Refusal::Missing(format!(
             "`{}` has no button `{button}`; its buttons are {:?}",
             dialog.title, dialog.buttons
-        ))
+        )))
     }
 }
 
