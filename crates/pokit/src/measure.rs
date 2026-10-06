@@ -177,8 +177,21 @@ pub fn summarize(raw: &Value, t: &Thresholds) -> Fields {
             .unwrap_or_default()
     };
 
+    let hidden: Vec<(f64, f64)> = raw["hidden"]
+        .as_array()
+        .map(|spans| {
+            spans
+                .iter()
+                .map(|s| (s[0].as_f64().unwrap_or(now), s[1].as_f64().unwrap_or(now)))
+                .collect()
+        })
+        .unwrap_or_default();
     let frames = times(&raw["frames"]);
-    let mut gaps: Vec<f64> = frames.windows(2).map(|w| w[1] - w[0]).collect();
+    let mut gaps: Vec<f64> = frames
+        .windows(2)
+        .filter(|w| !hidden.iter().any(|(from, to)| *from < w[1] && *to > w[0]))
+        .map(|w| w[1] - w[0])
+        .collect();
     gaps.sort_by(f64::total_cmp);
     let over: Vec<f64> = gaps.iter().copied().filter(|g| *g > t.over_ms).collect();
     let frames = if gaps.is_empty() {
@@ -229,16 +242,8 @@ pub fn summarize(raw: &Value, t: &Thresholds) -> Fields {
         None => json!({ "changes": "not requested", "last_value": "not requested" }),
     };
 
-    let hidden_ms: f64 = raw["hidden"]
-        .as_array()
-        .map(|spans| {
-            spans
-                .iter()
-                .map(|s| s[1].as_f64().unwrap_or(now) - s[0].as_f64().unwrap_or(now))
-                .sum()
-        })
-        .unwrap_or(0.0);
-    let was_hidden = raw["hidden"].as_array().is_some_and(|s| !s.is_empty());
+    let hidden_ms: f64 = hidden.iter().map(|(from, to)| to - from).sum();
+    let was_hidden = !hidden.is_empty();
 
     fields! {
         "frames" => frames,
@@ -331,6 +336,26 @@ mod tests {
         assert_eq!(
             s["hidden"],
             json!({ "was_hidden": true, "hidden_ms": 160.0 })
+        );
+    }
+
+    #[test]
+    fn the_gap_across_a_hidden_period_is_not_a_frame() {
+        let raw = json!({
+            "origin": 0.0, "start": 0.0, "now": 1200.0,
+            "frames": [0.0, 16.0, 32.0, 900.0, 916.0, 932.0],
+            "keys": [], "changes": null,
+            "hidden": [[40.0, 880.0]],
+        });
+        let s = summarize(&raw, &Thresholds::default());
+        assert_eq!(
+            s["frames"],
+            json!({ "count": 4, "p50_ms": 16.0, "p95_ms": 16.0, "max_ms": 16.0,
+                    "over_threshold": 0, "over_threshold_ms": 0.0 })
+        );
+        assert_eq!(
+            s["hidden"],
+            json!({ "was_hidden": true, "hidden_ms": 840.0 })
         );
     }
 

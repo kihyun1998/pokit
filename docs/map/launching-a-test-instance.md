@@ -16,6 +16,10 @@ How `pokit launch` gets a WebView2 app running with its own profile and a debugg
 - The DevTools HTTP server can keep the connection open after answering, even when asked to close it. A reader that waits for end-of-stream hangs until its timeout. The body has to be cut at `Content-Length`.
 - **The port has no authentication.** Any local process can drive the instance while it runs. This comes with WebView2 remote debugging; a pipe instead of a port is not available, because the WebView2 loader, not pokit, starts the browser process.
 
+## Focus
+
+- **`launch` leaves the foreground window where it was.** `launch_leaves_the_foreground_window_alone` compares the foreground window before `launch` with the one once the page is ready, and checks that no fixture window took it (#1, story 42). *Derivation, not measured directly:* what holds it is Windows' foreground lock, which also kept a background-launched window from taking focus in #3 (below, under Ruled out); the app is started by the background session, which has no right to take the foreground. The test therefore cannot be made to fail from inside pokit as it stands; it guards against pokit ever gaining that right, for example by starting the app from the CLI, which can inherit it from the terminal.
+
 ## Readiness
 
 A page is ready when its real document has loaded, is visible, and has painted two frames. It is checked for the main page at launch, and again before the first input to any page whose document has changed since. A new default execution context for the page's main frame (`Runtime.executionContextCreated`) marks the page not ready. Two traps sit behind that definition:

@@ -23,6 +23,32 @@ async fn open_second(app: tauri::AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// Hides the main window's webview for `ms` milliseconds, as a host does when its window is
+/// minimized (`IsVisible` false), without touching the window itself.
+#[tauri::command]
+async fn hide_webview_for(app: tauri::AppHandle, ms: u64) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or("the main window is gone")?;
+    set_webview_visible(&window, false);
+    tauri::async_runtime::spawn_blocking(move || {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+        set_webview_visible(&window, true);
+    });
+    Ok(())
+}
+
+#[cfg(windows)]
+fn set_webview_visible(window: &tauri::WebviewWindow, visible: bool) {
+    let _ = window.with_webview(move |webview| {
+        // SAFETY: the controller is live for the window's lifetime.
+        let _ = unsafe { webview.controller().SetIsVisible(visible) };
+    });
+}
+
+#[cfg(not(windows))]
+fn set_webview_visible(_window: &tauri::WebviewWindow, _visible: bool) {}
+
 /// Prints every key WebView2 raises through `AcceleratorKeyPressed` on the main window.
 #[cfg(windows)]
 fn log_accelerator_keys(window: &tauri::WebviewWindow) {
@@ -62,7 +88,11 @@ fn main() {
             let _ = app;
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![backend_log, open_second])
+        .invoke_handler(tauri::generate_handler![
+            backend_log,
+            open_second,
+            hide_webview_for
+        ])
         .run(tauri::generate_context!())
         .expect("fixture app failed to run");
 }
