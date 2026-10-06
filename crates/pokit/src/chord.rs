@@ -17,6 +17,31 @@ pub struct KeyPress {
     pub text: Option<String>,
 }
 
+impl KeyPress {
+    /// The key-down event CDP's `Input.dispatchKeyEvent` takes; `repeat` marks an auto-repeat.
+    pub fn down_event(&self, repeat: bool) -> serde_json::Value {
+        let mut down = serde_json::json!({
+            "type": if self.text.is_some() { "keyDown" } else { "rawKeyDown" },
+            "key": self.key,
+            "code": self.code,
+            "windowsVirtualKeyCode": self.vk,
+            "modifiers": self.modifiers,
+            "autoRepeat": repeat,
+        });
+        if let Some(t) = &self.text {
+            down["text"] = serde_json::json!(t);
+            down["unmodifiedText"] = serde_json::json!(t);
+        }
+        down
+    }
+
+    /// The key-up event CDP's `Input.dispatchKeyEvent` takes.
+    pub fn up_event(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "keyUp", "key": self.key, "code": self.code,
+                            "windowsVirtualKeyCode": self.vk, "modifiers": self.modifiers })
+    }
+}
+
 /// A physical key: its `code`, the key value unshifted and shifted, and its Windows virtual key code.
 struct Key {
     code: &'static str,

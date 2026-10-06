@@ -34,6 +34,13 @@
     <p id="last-key" role="status"></p>
   </section>
 
+  <section id="pane-measure">
+    <h2>Measure</h2>
+    <label for="stall">Stall field</label>
+    <input id="stall" type="text">
+    <p id="key-count" data-count="0"></p>
+  </section>
+
   <section id="pane-actions">
     <h2>Actions</h2>
     <button id="show-later" type="button">Show later</button>
@@ -97,6 +104,17 @@
       p.textContent = 'Here';
       $('late-slot').appendChild(p);
     });
+
+    // Every keydown in the stall field blocks the page for `window.__stallMs` (0 until a test sets it),
+    // then bumps the key count's `data-count` once.
+    window.__stallMs = 0;
+    function stallOnKey() {
+      const end = performance.now() + window.__stallMs;
+      while (performance.now() < end) {}
+      const count = $('key-count');
+      count.dataset.count = String(Number(count.dataset.count) + 1);
+    }
+    $('stall').addEventListener('keydown', stallOnKey);
 
     $('open-second').addEventListener('click', () => invoke('open_second'));
     $('throw').addEventListener('click', () => setTimeout(() => { throw new Error('fixture boom'); }));
