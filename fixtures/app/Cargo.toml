@@ -17,3 +17,4 @@ tauri-plugin-pokit = { path = "../../crates/tauri-plugin-pokit", optional = true
 
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.39"
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }

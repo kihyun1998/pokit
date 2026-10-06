@@ -65,6 +65,14 @@ pub enum Request {
         text: String,
         secret: bool,
     },
+    NativeList,
+    NativeChoose {
+        path: String,
+    },
+    NativeAnswer {
+        button: String,
+        dialog: Option<String>,
+    },
     TraceStart,
     TraceStop,
     ProfileStart {
@@ -110,6 +118,9 @@ pub enum CommandKind {
     MeasureStop,
     ClipboardRead,
     ClipboardWrite,
+    NativeList,
+    NativeChoose,
+    NativeAnswer,
     TraceStart,
     TraceStop,
     ProfileStart,
@@ -138,6 +149,9 @@ impl Request {
             Request::MeasureStop { .. } => CommandKind::MeasureStop,
             Request::ClipboardRead => CommandKind::ClipboardRead,
             Request::ClipboardWrite { .. } => CommandKind::ClipboardWrite,
+            Request::NativeList => CommandKind::NativeList,
+            Request::NativeChoose { .. } => CommandKind::NativeChoose,
+            Request::NativeAnswer { .. } => CommandKind::NativeAnswer,
             Request::TraceStart => CommandKind::TraceStart,
             Request::TraceStop => CommandKind::TraceStop,
             Request::ProfileStart { .. } => CommandKind::ProfileStart,
@@ -198,6 +212,9 @@ impl CommandKind {
             CommandKind::MeasureStop => "measure_stop",
             CommandKind::ClipboardRead => "clipboard_read",
             CommandKind::ClipboardWrite => "clipboard_write",
+            CommandKind::NativeList => "native_list",
+            CommandKind::NativeChoose => "native_choose",
+            CommandKind::NativeAnswer => "native_answer",
             CommandKind::TraceStart => "trace_start",
             CommandKind::TraceStop => "trace_stop",
             CommandKind::ProfileStart => "profile_start",
@@ -229,6 +246,9 @@ impl CommandKind {
             | CommandKind::MeasureStop
             | CommandKind::ClipboardRead
             | CommandKind::ClipboardWrite
+            | CommandKind::NativeList
+            | CommandKind::NativeChoose
+            | CommandKind::NativeAnswer
             | CommandKind::TraceStart
             | CommandKind::TraceStop
             | CommandKind::ProfileStart
@@ -256,6 +276,9 @@ impl CommandKind {
             | CommandKind::MeasureStop
             | CommandKind::ClipboardRead
             | CommandKind::ClipboardWrite
+            | CommandKind::NativeList
+            | CommandKind::NativeChoose
+            | CommandKind::NativeAnswer
             | CommandKind::TraceStart
             | CommandKind::TraceStop
             | CommandKind::ProfileStart
@@ -284,6 +307,9 @@ impl CommandKind {
             | CommandKind::MeasureStop
             | CommandKind::ClipboardRead
             | CommandKind::ClipboardWrite
+            | CommandKind::NativeList
+            | CommandKind::NativeChoose
+            | CommandKind::NativeAnswer
             | CommandKind::TraceStart
             | CommandKind::TraceStop
             | CommandKind::ProfileStart
@@ -353,6 +379,14 @@ mod tests {
             Request::ClipboardWrite {
                 text: "a".into(),
                 secret: false,
+            },
+            Request::NativeList,
+            Request::NativeChoose {
+                path: "File > Open".into(),
+            },
+            Request::NativeAnswer {
+                button: "Yes".into(),
+                dialog: None,
             },
             Request::TraceStart,
             Request::TraceStop,

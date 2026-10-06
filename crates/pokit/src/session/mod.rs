@@ -6,6 +6,8 @@ mod commands;
 mod launch;
 mod logs;
 mod measure;
+#[cfg(windows)]
+mod native;
 mod pages;
 mod profiling;
 mod record;
@@ -245,11 +247,13 @@ async fn serve(mut config: Config) {
     let launching = Arc::new(std::sync::atomic::AtomicBool::new(true));
     #[cfg(windows)]
     let keeping = info.app_pid.map(|pid| {
+        let launching = launching.clone();
         tokio::spawn(launch::keep_foreground(
             state.clone(),
             pid,
             foreground_before,
-            launching.clone(),
+            "during launch",
+            move || launching.load(std::sync::atomic::Ordering::SeqCst),
         ))
     });
 
