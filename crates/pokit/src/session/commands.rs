@@ -111,6 +111,10 @@ impl State {
                 )
                 .await
             }
+            Request::TraceStart => self.trace_start_cmd().await,
+            Request::TraceStop => self.trace_stop_cmd().await,
+            Request::ProfileStart { interval_us } => self.profile_start_cmd(*interval_us).await,
+            Request::ProfileStop { top } => self.profile_stop_cmd(*top).await,
             Request::MeasureStop {
                 quiet_ms,
                 ceiling_ms,

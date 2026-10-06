@@ -10,10 +10,12 @@ mod home;
 mod measure;
 mod output;
 mod proc;
+mod profile;
 mod redact;
 mod request;
 mod session;
 mod snapshot;
+mod trace;
 
 use clap::{Parser, Subcommand};
 use home::{Mode, Status};
@@ -63,6 +65,30 @@ enum MeasureAction {
         /// Milliseconds to wait for that before reporting the page unsettled.
         #[arg(long, default_value_t = 10_000)]
         ceiling: u64,
+    },
+}
+
+#[derive(Subcommand)]
+enum TraceAction {
+    /// Start recording the trace.
+    Start,
+    /// End the trace, save it to the run record, and split the busiest main thread's time.
+    Stop,
+}
+
+#[derive(Subcommand)]
+enum ProfileAction {
+    /// Start sampling the page's JavaScript.
+    Start {
+        /// Microseconds between samples.
+        #[arg(long, default_value_t = 100)]
+        interval_us: u64,
+    },
+    /// End the profile, save it to the run record, and rank self time by function and by file.
+    Stop {
+        /// How many functions and files to list.
+        #[arg(long, default_value_t = 20)]
+        top: usize,
     },
 }
 
@@ -169,6 +195,16 @@ enum Command {
     Measure {
         #[command(subcommand)]
         action: MeasureAction,
+    },
+    /// Record a timeline trace around the commands run between `trace start` and `trace stop`.
+    Trace {
+        #[command(subcommand)]
+        action: TraceAction,
+    },
+    /// Record a CPU profile around the commands run between `profile start` and `profile stop`.
+    Profile {
+        #[command(subcommand)]
+        action: ProfileAction,
     },
     /// Block until an element appears, a text is on the page, or an expression is true.
     Wait {
@@ -423,6 +459,18 @@ fn dispatch(cli: Cli) -> (String, i32, Value) {
             quiet_ms: quiet,
             ceiling_ms: ceiling,
         },
+        Command::Trace {
+            action: TraceAction::Start,
+        } => Request::TraceStart,
+        Command::Trace {
+            action: TraceAction::Stop,
+        } => Request::TraceStop,
+        Command::Profile {
+            action: ProfileAction::Start { interval_us },
+        } => Request::ProfileStart { interval_us },
+        Command::Profile {
+            action: ProfileAction::Stop { top },
+        } => Request::ProfileStop { top },
         Command::Wait {
             selector,
             text,

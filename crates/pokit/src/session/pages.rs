@@ -9,7 +9,7 @@ use crate::output::{Failure, Kind};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 /// Keeps a connection to every page target as windows open and close.
 pub(super) async fn discover(state: Arc<State>) {
@@ -23,6 +23,18 @@ pub(super) async fn discover(state: Arc<State>) {
 
 pub(super) async fn collect_events(state: Arc<State>, mut rx: mpsc::UnboundedReceiver<Event>) {
     while let Some((target, method, params)) = rx.recv().await {
+        let waiting = {
+            let mut waiters = state.waiters.lock().unwrap();
+            waiters.retain(|w| !w.tx.is_closed());
+            waiters
+                .iter()
+                .position(|w| w.target == target && w.method == method)
+                .map(|i| waiters.remove(i))
+        };
+        if let Some(w) = waiting {
+            let _ = w.tx.send(params);
+            continue;
+        }
         let url = state
             .targets
             .lock()
@@ -58,6 +70,13 @@ pub(super) async fn collect_events(state: Arc<State>, mut rx: mpsc::UnboundedRec
     }
 }
 
+/// A command waiting for one event from one target.
+pub(super) struct Waiter {
+    target: String,
+    method: String,
+    tx: oneshot::Sender<Value>,
+}
+
 fn remote_text(arg: &Value) -> String {
     match &arg["value"] {
         Value::String(s) => s.clone(),
@@ -71,6 +90,18 @@ fn remote_text(arg: &Value) -> String {
 }
 
 impl State {
+    /// The params of the next `method` event from `target`. Register it before sending the
+    /// command that causes the event.
+    pub(super) fn expect_event(&self, target: &str, method: &str) -> oneshot::Receiver<Value> {
+        let (tx, rx) = oneshot::channel();
+        self.waiters.lock().unwrap().push(Waiter {
+            target: target.to_string(),
+            method: method.to_string(),
+            tx,
+        });
+        rx
+    }
+
     /// Connects to page targets not yet held and drops ones that are gone. Only page sockets on
     /// this instance's own debugging port are followed.
     pub(super) async fn sync_targets(&self, pages: &[Value]) {
@@ -131,6 +162,10 @@ impl State {
             .lock()
             .unwrap()
             .retain(|id| live.contains(&id.as_str()));
+        self.waiters
+            .lock()
+            .unwrap()
+            .retain(|w| live.contains(&w.target.as_str()));
     }
 
     pub(super) fn cdp(&self, id: &str) -> Result<Arc<Cdp>, Failure> {
