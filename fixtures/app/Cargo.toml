@@ -7,8 +7,13 @@ publish = false
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[features]
+# The test build: pokit's plugin, and a launch that leaves the frontmost app in front.
+pokit = ["dep:tauri-plugin-pokit"]
+
 [dependencies]
 tauri = { version = "2", features = ["custom-protocol"] }
+tauri-plugin-pokit = { path = "../../crates/tauri-plugin-pokit", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.39"

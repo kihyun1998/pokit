@@ -1,0 +1,17 @@
+[package]
+name = "tauri-plugin-pokit"
+version = "0.1.0"
+edition = "2021"
+description = "pokit's plugin for a Tauri app's test build: a loopback channel pokit evaluates JavaScript through."
+repository = "https://github.com/kihyun1998/pokit"
+publish = false
+
+[dependencies]
+tauri = "2"
+serde_json = "1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSDictionary", "NSError", "NSString", "NSThread"] }
+objc2-web-kit = { version = "0.3", features = ["WKWebView", "WKContentWorld", "WKFrameInfo", "block2", "objc2-app-kit"] }

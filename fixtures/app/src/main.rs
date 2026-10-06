@@ -79,7 +79,12 @@ fn log_accelerator_keys(window: &tauri::WebviewWindow) {
 
 fn main() {
     println!("fixture-backend: started");
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(feature = "pokit")]
+    let builder = builder.plugin(tauri_plugin_pokit::init());
+    #[cfg(all(feature = "pokit", target_os = "macos"))]
+    let builder = builder.activate_ignoring_other_apps(false);
+    builder
         .setup(|app| {
             #[cfg(windows)]
             if let Some(window) = app.get_webview_window("main") {

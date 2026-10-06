@@ -1,5 +1,7 @@
 //! pokit's command-line contract, against the fixture app.
 
+#![cfg(windows)]
+
 mod common;
 
 use common::*;

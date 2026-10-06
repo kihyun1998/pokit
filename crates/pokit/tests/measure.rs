@@ -1,5 +1,7 @@
 //! `hold` and `measure`, against the fixture app's stall field.
 
+#![cfg(windows)]
+
 mod common;
 
 use common::*;

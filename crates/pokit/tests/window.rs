@@ -1,6 +1,8 @@
 //! The fixture app's window at launch, behind another window, minimized, and with its webview
 //! hidden.
 
+#![cfg(windows)]
+
 mod common;
 
 use common::window::{self, Cover};

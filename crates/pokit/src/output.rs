@@ -105,7 +105,12 @@ macro_rules! fields {
     }};
 }
 
-pub const ENGINE: &str = "cdp";
+/// What reaches the page: CDP on Windows, the test build's plugin on macOS.
+pub const ENGINE: &str = if cfg!(target_os = "macos") {
+    "plugin"
+} else {
+    "cdp"
+};
 
 /// The printed object and exit code for one command's outcome.
 pub fn render(command: &str, outcome: &Outcome) -> (i32, Value) {
