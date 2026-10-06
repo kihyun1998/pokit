@@ -46,19 +46,6 @@ fn assert_still_rendering(what: &str, m: &Value) {
     assert_eq!(m["keys"]["handled"], 10, "{what}: {m}");
 }
 
-/// Whether this test descends from the foreground app, so that a launch could take the
-/// foreground at all; says why not when it does not.
-fn can_take_foreground(test: &str) -> bool {
-    let owner = window::window_pid(window::foreground());
-    let can = window::ancestors(std::process::id()).contains(&owner);
-    if !can {
-        eprintln!(
-            "{test}: the foreground app (pid {owner}) did not start this test, so launch could              not take the foreground either way; run it from the terminal in front to test anything"
-        );
-    }
-    can
-}
-
 /// Windows passes the right to take the foreground down from the foreground process to the
 /// processes it starts, so `launch` can only take it when this test descends from the
 /// foreground app, as it does when run from the terminal the user is looking at. Both cases run
@@ -70,7 +57,7 @@ fn launch_leaves_the_foreground_where_it_was() {
         before, 0,
         "no window is in the foreground, so there is nothing to keep"
     );
-    if !can_take_foreground("launch_leaves_the_foreground_where_it_was") {
+    if !window::can_take_foreground("launch_leaves_the_foreground_where_it_was") {
         return;
     }
 

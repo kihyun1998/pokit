@@ -5,6 +5,7 @@ use super::State;
 use crate::cdp::Cdp;
 use crate::chord::{self, KeyPress};
 use crate::fields;
+use crate::hangul;
 use crate::home::Mode;
 use crate::output::{self, Failure, Fields, Kind, Outcome};
 use crate::redact::redact;
@@ -527,8 +528,39 @@ impl State {
         let cdp = self.focus_for_input(into, require_focus).await?;
         let mut keyed = 0;
         let mut inserted = 0;
+        let mut composed = 0;
         let mut sent = Vec::new();
+        let mut ime = hangul::Composer::default();
         for c in text.chars() {
+            if hangul::is_composed(c) {
+                if !hangul::is_syllable(c) {
+                    if let Some(rest) = ime.finish() {
+                        commit(&cdp, &rest, &mut sent).await?;
+                    }
+                }
+                for jamo in hangul::keys_for(c) {
+                    let step = ime.press(jamo);
+                    if let Err(e) = send_ime_key(&cdp, jamo, step, &mut sent).await {
+                        let _ = cdp
+                            .call(
+                                "Input.imeSetComposition",
+                                json!({ "text": "", "selectionStart": 0, "selectionEnd": 0 }),
+                            )
+                            .await;
+                        return Err(e);
+                    }
+                }
+                if !hangul::is_syllable(c) {
+                    if let Some(rest) = ime.finish() {
+                        commit(&cdp, &rest, &mut sent).await?;
+                    }
+                }
+                composed += 1;
+                continue;
+            }
+            if let Some(rest) = ime.finish() {
+                commit(&cdp, &rest, &mut sent).await?;
+            }
             let press = if c == '\n' {
                 chord::parse_chord("Enter").ok()
             } else {
@@ -547,7 +579,15 @@ impl State {
                 }
             }
         }
-        let f = fields! { "typed_chars" => keyed + inserted, "key_events" => keyed, "inserted_chars" => inserted };
+        if let Some(rest) = ime.finish() {
+            commit(&cdp, &rest, &mut sent).await?;
+        }
+        let f = fields! {
+            "typed_chars" => keyed + inserted + composed,
+            "key_events" => keyed,
+            "inserted_chars" => inserted,
+            "composed_chars" => composed,
+        };
         Ok(self.stamp(f, &sent))
     }
 
@@ -658,6 +698,54 @@ enum Condition<'a> {
     Selector(&'a str),
     Text(&'a str),
     Expr(&'a str),
+}
+
+/// One key of a 2-Set IME: a `Process` key-down, the text the IME commits, the composition it
+/// leaves, then the key-up, noting when each event was sent.
+async fn send_ime_key(
+    cdp: &Cdp,
+    jamo: char,
+    step: hangul::Step,
+    sent: &mut Vec<Instant>,
+) -> Result<(), Failure> {
+    let (code, shift) = hangul::key_for(jamo).unwrap_or(("", false));
+    let vk = chord::parse_chord(code).map(|p| p.vk).unwrap_or(0);
+    let modifiers = if shift { chord::SHIFT } else { 0 };
+    sent.push(Instant::now());
+    cdp.call(
+        "Input.dispatchKeyEvent",
+        json!({ "type": "rawKeyDown", "key": "Process", "code": code,
+                "windowsVirtualKeyCode": 229, "modifiers": modifiers }),
+    )
+    .await?;
+    if let Some(text) = &step.committed {
+        commit(cdp, text, sent).await?;
+    }
+    if !step.composing.is_empty() {
+        let end = step.composing.encode_utf16().count();
+        sent.push(Instant::now());
+        cdp.call(
+            "Input.imeSetComposition",
+            json!({ "text": step.composing, "selectionStart": end, "selectionEnd": end }),
+        )
+        .await?;
+    }
+    sent.push(Instant::now());
+    cdp.call(
+        "Input.dispatchKeyEvent",
+        json!({ "type": "keyUp", "key": jamo.to_string(), "code": code,
+                "windowsVirtualKeyCode": vk, "modifiers": modifiers }),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Commits `text`, ending the composition in progress.
+async fn commit(cdp: &Cdp, text: &str, sent: &mut Vec<Instant>) -> Result<(), Failure> {
+    sent.push(Instant::now());
+    cdp.call("Input.insertText", json!({ "text": text }))
+        .await?;
+    Ok(())
 }
 
 /// Presses and releases `p`, noting when each event was sent.

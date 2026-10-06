@@ -45,6 +45,8 @@
     <h2>Clipboard</h2>
     <label for="clip">Clipboard field</label>
     <input id="clip" type="text">
+    <label for="ime">IME field</label>
+    <input id="ime" type="text">
   </section>
 
   <section id="pane-actions">
@@ -63,8 +65,9 @@
     // Every keyboard, input and focus event, in order, for reading back what the page received.
     window.__events = [];
     const describe = (t) => (t === window ? 'window' : t.id || t.nodeName);
-    for (const type of ['keydown', 'keyup', 'input', 'focusin', 'focusout']) {
-      document.addEventListener(type, (e) => window.__events.push([Math.round(performance.now()), type, describe(e.target), e.key ?? '']), true);
+    for (const type of ['keydown', 'keyup', 'input', 'focusin', 'focusout',
+                        'compositionstart', 'compositionupdate', 'compositionend']) {
+      document.addEventListener(type, (e) => window.__events.push([Math.round(performance.now()), type, describe(e.target), e.key ?? e.data ?? '']), true);
     }
     for (const type of ['focus', 'blur']) {
       window.addEventListener(type, (e) => { if (e.target === window) window.__events.push([Math.round(performance.now()), type, 'window', '']); });

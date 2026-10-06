@@ -232,3 +232,16 @@ pub fn ancestors(pid: u32) -> Vec<u32> {
         .filter_map(|s| s.parse().ok())
         .collect()
 }
+
+/// Whether this test descends from the foreground app, so that a launch could take the
+/// foreground at all; says why not when it does not.
+pub fn can_take_foreground(test: &str) -> bool {
+    let owner = window_pid(foreground());
+    let can = ancestors(std::process::id()).contains(&owner);
+    if !can {
+        eprintln!(
+            "{test}: the foreground app (pid {owner}) did not start this test, so launch could              not take the foreground either way; run it from the terminal in front to test anything"
+        );
+    }
+    can
+}
