@@ -20,21 +20,30 @@ fn workspace_root() -> PathBuf {
 /// The fixture app, built once per test run into its own target directory.
 pub fn fixture_exe() -> &'static Path {
     static EXE: OnceLock<PathBuf> = OnceLock::new();
-    EXE.get_or_init(|| {
-        let root = workspace_root();
-        let target = root.join("target").join("fixture");
-        let status = Command::new(env!("CARGO"))
-            .args(["build", "-q", "-p", "pokit-fixture", "--target-dir"])
-            .arg(&target)
-            .current_dir(&root)
-            .status()
-            .expect("cargo build of the fixture app did not start");
-        assert!(status.success(), "fixture app failed to build");
-        target.join("debug").join(if cfg!(windows) {
-            "pokit-fixture.exe"
-        } else {
-            "pokit-fixture"
-        })
+    EXE.get_or_init(|| build_fixture("fixture", &[]))
+}
+
+/// The fixture app's test build, with pokit's plugin feature on, in a target directory of its own.
+pub fn fixture_test_build_exe() -> &'static Path {
+    static EXE: OnceLock<PathBuf> = OnceLock::new();
+    EXE.get_or_init(|| build_fixture("fixture-pokit", &["--features", "pokit"]))
+}
+
+fn build_fixture(target_name: &str, extra: &[&str]) -> PathBuf {
+    let root = workspace_root();
+    let target = root.join("target").join(target_name);
+    let status = Command::new(env!("CARGO"))
+        .args(["build", "-q", "-p", "pokit-fixture", "--target-dir"])
+        .arg(&target)
+        .args(extra)
+        .current_dir(&root)
+        .status()
+        .expect("cargo build of the fixture app did not start");
+    assert!(status.success(), "fixture app failed to build");
+    target.join("debug").join(if cfg!(windows) {
+        "pokit-fixture.exe"
+    } else {
+        "pokit-fixture"
     })
 }
 
@@ -62,7 +71,12 @@ impl Pokit {
 
     pub fn launch_fixture(name: &str) -> Self {
         let mut p = Pokit::new(name);
-        let exe = fixture_exe().to_str().unwrap().to_string();
+        let exe = if cfg!(target_os = "macos") {
+            fixture_test_build_exe()
+        } else {
+            fixture_exe()
+        };
+        let exe = exe.to_str().unwrap().to_string();
         let r = p.run(&["launch", &exe]);
         assert_eq!(r.code, 0, "launch failed: {}", r.out);
         p.launched = Some(r.out);
@@ -181,12 +195,24 @@ impl Drop for Pokit {
 }
 
 /// Whether a process with this id is running.
+#[cfg(windows)]
 pub fn process_alive(pid: u32) -> bool {
     let out = Command::new("tasklist")
         .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
         .output()
         .unwrap();
     String::from_utf8_lossy(&out.stdout).contains(&format!("\"{pid}\""))
+}
+
+/// Whether a process with this id is running.
+#[cfg(not(windows))]
+pub fn process_alive(pid: u32) -> bool {
+    Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 /// Polls `cond` every 100 ms for up to `ms`.

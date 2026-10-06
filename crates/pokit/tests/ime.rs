@@ -1,5 +1,7 @@
 //! Korean typed through IME composition over CDP, against the fixture app's IME field.
 
+#![cfg(windows)]
+
 mod common;
 
 use common::*;

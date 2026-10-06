@@ -9,6 +9,7 @@ mod measure;
 mod pages;
 mod profiling;
 mod record;
+mod through_plugin;
 
 use crate::cdp::{Cdp, Event};
 use crate::fields;
@@ -111,6 +112,9 @@ pub fn run(config: Config) {
 }
 
 async fn serve(mut config: Config) {
+    if cfg!(target_os = "macos") {
+        return through_plugin::serve(config).await;
+    }
     let pid = std::process::id();
     let listener = match TcpListener::bind(("127.0.0.1", 0)).await {
         Ok(l) => l,

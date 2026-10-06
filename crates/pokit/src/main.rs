@@ -11,12 +11,14 @@ mod hangul;
 mod home;
 mod measure;
 mod output;
+mod plugin;
 mod proc;
 mod profile;
 mod redact;
 mod request;
 mod session;
 mod snapshot;
+mod support;
 mod trace;
 
 use clap::{Parser, Subcommand};
@@ -323,6 +325,20 @@ fn dispatch(cli: Cli) -> (String, i32, Value) {
             idle_timeout,
             ready_timeout,
         } => {
+            let webview2_only = [
+                ("--port", port.is_some()),
+                ("--data-dir", data_dir.is_some()),
+            ];
+            if let (true, Some((flag, _))) = (
+                cfg!(target_os = "macos"),
+                webview2_only.iter().find(|(_, given)| *given),
+            ) {
+                let message = format!(
+                    "{flag} names WebView2's debugging port or profile; it has no meaning on macOS"
+                );
+                let refused = Failure::new(Kind::Unsupported, message).with("platform", "macos");
+                return outcome_json("launch", Err(refused));
+            }
             let env = match parse_env(&env) {
                 Ok(e) => e,
                 Err(f) => return outcome_json("launch", Err(f)),
@@ -358,6 +374,9 @@ fn dispatch(cli: Cli) -> (String, i32, Value) {
                 ready_timeout_secs: ready_timeout,
             };
             return start_session(config, timeout);
+        }
+        Command::Doctor { .. } if cfg!(target_os = "macos") => {
+            return outcome_json("doctor", Err(support::refused("doctor")))
         }
         Command::Doctor { port: Some(port) } => {
             let rt = tokio::runtime::Runtime::new().unwrap();
@@ -535,6 +554,9 @@ fn dispatch(cli: Cli) -> (String, i32, Value) {
 
 fn send(request: Request, timeout: Duration) -> (String, i32, Value) {
     let name = request.kind().name();
+    if !support::session_answers(name) {
+        return outcome_json(name, Err(support::refused(name)));
+    }
     let Some(info) = home::read_session().filter(|s| s.status == Status::Ready) else {
         return outcome_json(
             name,
@@ -552,14 +574,8 @@ fn send(request: Request, timeout: Duration) -> (String, i32, Value) {
 
 fn start_session(config: session::Config, timeout: Duration) -> (String, i32, Value) {
     let name = config.mode.name();
-    if !cfg!(windows) {
-        return outcome_json(
-            name,
-            Err(Failure::new(
-                Kind::Unsupported,
-                "only the Windows backend exists so far; macOS is step 4 (#6)",
-            )),
-        );
+    if !support::answers(name) {
+        return outcome_json(name, Err(support::refused(name)));
     }
     {
         if let Err(f) = clear_stale_session() {
@@ -654,8 +670,8 @@ fn capabilities() -> output::Fields {
     {
         let support = match sub.get_name() {
             "capabilities" => json!({ "supported": true }),
-            _ if cfg!(windows) => json!({ "supported": true, "route": "cdp" }),
-            _ => unsupported(),
+            name if support::answers(name) => json!({ "supported": true, "route": output::ENGINE }),
+            name => json!({ "supported": false, "reason": support::reason(name) }),
         };
         commands.insert(sub.get_name().to_string(), support);
     }
@@ -663,10 +679,6 @@ fn capabilities() -> output::Fields {
         "platform" => std::env::consts::OS,
         "commands" => Value::Object(commands),
     }
-}
-
-fn unsupported() -> Value {
-    json!({ "supported": false, "reason": "only the Windows backend exists so far; macOS is step 4 (#6)" })
 }
 
 /// The text a command was given: from stdin with `--secret`, from an environment variable with

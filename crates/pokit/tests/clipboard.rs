@@ -1,6 +1,8 @@
 //! `clipboard`, against the fixture app's clipboard field. The clipboard is one per desktop, so
 //! every case runs in this one test, in order.
 
+#![cfg(windows)]
+
 mod common;
 
 use common::*;

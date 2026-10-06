@@ -22,4 +22,4 @@ A comment says what the code is. Why it is this way, what it deliberately leaves
 
 - `crates/pokit/` — the CLI and its session.
 - `fixtures/app/` — the fixture app the tests drive.
-- `crates/tauri-plugin-pokit/` — the macOS plugin, when step 4 (#6) adds it.
+- `crates/tauri-plugin-pokit/` — the plugin an app's test build carries; on macOS pokit reaches the page through it.
