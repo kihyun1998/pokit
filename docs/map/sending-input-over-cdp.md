@@ -3,7 +3,20 @@
 How `click`, `type` and `key` reach the page on Windows, and what masking covers. Code: `session::commands::send_key`, `State::click_cmd` (session/commands.rs), `State::focus_for_input`, `State::guard_target`, `chord`, `redact`.
 
 - **`Input.dispatchKeyEvent` replies only after the renderer acknowledges the event.** It also focuses the target widget first. If the event never reaches an input observer, the reply comes at once and still says success. Source: `content/browser/devtools/protocol/input_handler.cc` (Chromium main, 2026-09-25), lines 776–797 and 835–848. A reply is therefore not proof of delivery; see the readiness trap in [[launching-a-test-instance]].
-- **Typed text goes key by key where the US layout has the character** (`keyDown` with `text`, then `keyUp`), and through `Input.insertText` where it does not (Hangul, for example). A newline, `\r` or `\r\n`, is one Enter press.
+- **Typed text goes key by key where the US layout has the character** (`keyDown` with `text`, then `keyUp`), through a 2-Set IME composition where it is Hangul, and through `Input.insertText` otherwise (other scripts, emoji). A newline, `\r` or `\r\n`, is one Enter press.
+- **Hangul is composed key by key, as a 2-Set (Dubeolsik) IME composes it.** Each syllable is split into the jamo keys a person presses (`hangul::keys_for`), and `hangul::Composer` runs them through the 2-Set rules. Compound vowels and finals build up over two keys. A final consonant moves to the next syllable when a vowel follows: typing 가나 shows 간 before it becomes 가 + 나. A compound final splits. For each key pokit sends:
+  - a `Process` key-down (virtual key 229, with the physical key's `code`);
+  - `Input.insertText` for any syllable the key commits;
+  - `Input.imeSetComposition` for the composition left;
+  - a key-up carrying the jamo.
+
+  *Derivation, not measured against a real IME:* the key-up's `key` and virtual key. An OS-input comparison in #5 can check them.
+- **IME composition needs no focus.** `Input.imeSetComposition` and `Input.insertText` go straight to the renderer's IME handling (`ImeSetComposition` / `ImeCommitText` on the widget input handler, `content/browser/devtools/protocol/input_handler.cc` 1281–1358, Chromium main, read 2026-10-06), not through the OS. Measured 2026-10-06 on the fixture, typing 한글 gave:
+  - `compositionstart`, `compositionupdate` ㅎ 하 한, `compositionend` 한, then the same for ㄱ 그 글;
+  - a `Process` key-down per key;
+  - the value 한글, with the foreground window unchanged.
+
+  Blink sends one more `compositionupdate` with the committed text just before each `compositionend`.
 - **Chords use physical key names.** `key` and the virtual key code come from a US layout table. Modifier bits are Alt 1, Ctrl 2, Meta 4, Shift 8. `Ctrl+Equal` gives `key "=", code "Equal", vk 187, modifiers 2`, the same values penterm's held-size-key script sends. Modifiers travel as flags on the main key only. Playwright presses each modifier as its own key, so a page counting keydowns sees the two differently.
 - **The focus guard is checked before pokit changes anything on the page.** Without `--into`, the focused element must lie inside `--require-focus`. With `--into`, the target must lie inside it; only then is it focused, and the focus is checked again once it lands. *Derivation (#3), not a maintainer's call:* the guard exists so that input cannot land in the wrong place, and with `--into` the place is the target.
 - **CDP keys reach the page whether or not the app is in front.** In the fixture, `Ctrl+KeyK` was recorded by the page both while the app was behind another window and after it was clicked. All 10 keys of a `hold` also reached the page with its window fully covered, and with it minimized (2026-10-06); Tauri keeps the webview visible when minimized ([[measuring-the-page]]).

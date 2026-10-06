@@ -7,6 +7,7 @@ mod clipboard;
 mod clock;
 mod devtools;
 mod doctor;
+mod hangul;
 mod home;
 mod measure;
 mod output;
