@@ -34,6 +34,7 @@ impl State {
                 if self.config.mode == Mode::Attach {
                     self.remove_probes().await;
                 }
+                self.restore_clipboard().await;
                 Ok(fields! { "closed" => self.config.mode == Mode::Launch })
             }
             Request::Targets { select } => self.targets_cmd(select.as_deref()).await,
@@ -111,6 +112,15 @@ impl State {
                 )
                 .await
             }
+            #[cfg(windows)]
+            Request::ClipboardRead => self.clipboard_read_cmd().await,
+            #[cfg(windows)]
+            Request::ClipboardWrite { text, .. } => self.clipboard_write_cmd(text).await,
+            #[cfg(not(windows))]
+            Request::ClipboardRead | Request::ClipboardWrite { .. } => Err(Failure::new(
+                Kind::Unsupported,
+                "the clipboard is not built on this platform yet",
+            )),
             Request::TraceStart => self.trace_start_cmd().await,
             Request::TraceStop => self.trace_stop_cmd().await,
             Request::ProfileStart { interval_us } => self.profile_start_cmd(*interval_us).await,

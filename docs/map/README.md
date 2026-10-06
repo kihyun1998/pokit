@@ -7,3 +7,4 @@ brings hand-written notes into its format.
 - [Sending input over CDP](sending-input-over-cdp.md)
 - [Measuring the page](measuring-the-page.md)
 - [Tracing and profiling the page](tracing-and-profiling.md)
+- [Using the user's clipboard](using-the-clipboard.md)

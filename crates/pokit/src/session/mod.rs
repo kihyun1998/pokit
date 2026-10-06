@@ -1,6 +1,7 @@
 //! The session (ADR-0001): a background process that holds the connection to one app instance
 //! and answers every other command.
 
+mod clipboard;
 mod commands;
 mod launch;
 mod logs;
@@ -92,6 +93,8 @@ struct State {
     profiling: Mutex<Option<profiling::Recording>>,
     /// Commands waiting for one event from one target.
     waiters: Mutex<Vec<pages::Waiter>>,
+    /// What the session did to the user's clipboard.
+    clipboard: Mutex<clipboard::ClipboardState>,
 }
 
 /// Runs the session process until `close`, idle timeout, or the launched app exits.
@@ -197,6 +200,7 @@ async fn serve(mut config: Config) {
         tracing: Mutex::default(),
         profiling: Mutex::default(),
         waiters: Mutex::default(),
+        clipboard: Mutex::default(),
     });
 
     if let Some(child) = app.as_mut() {
@@ -386,6 +390,7 @@ impl State {
         if self.config.mode == Mode::Attach {
             self.remove_probes().await;
         }
+        self.restore_clipboard().await;
         home::remove_session_if(std::process::id());
         let mut ended = json!({ "mode": self.config.mode.name() });
         if self.config.mode == Mode::Launch {

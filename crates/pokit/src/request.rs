@@ -60,6 +60,11 @@ pub enum Request {
         quiet_ms: u64,
         ceiling_ms: u64,
     },
+    ClipboardRead,
+    ClipboardWrite {
+        text: String,
+        secret: bool,
+    },
     TraceStart,
     TraceStop,
     ProfileStart {
@@ -103,6 +108,8 @@ pub enum CommandKind {
     Hold,
     MeasureStart,
     MeasureStop,
+    ClipboardRead,
+    ClipboardWrite,
     TraceStart,
     TraceStop,
     ProfileStart,
@@ -129,6 +136,8 @@ impl Request {
             Request::Hold { .. } => CommandKind::Hold,
             Request::MeasureStart { .. } => CommandKind::MeasureStart,
             Request::MeasureStop { .. } => CommandKind::MeasureStop,
+            Request::ClipboardRead => CommandKind::ClipboardRead,
+            Request::ClipboardWrite { .. } => CommandKind::ClipboardWrite,
             Request::TraceStart => CommandKind::TraceStart,
             Request::TraceStop => CommandKind::TraceStop,
             Request::ProfileStart { .. } => CommandKind::ProfileStart,
@@ -164,7 +173,8 @@ impl Request {
         match self {
             Request::Type {
                 text, secret: true, ..
-            } => Some(text),
+            }
+            | Request::ClipboardWrite { text, secret: true } => Some(text),
             _ => None,
         }
     }
@@ -186,6 +196,8 @@ impl CommandKind {
             CommandKind::Hold => "hold",
             CommandKind::MeasureStart => "measure_start",
             CommandKind::MeasureStop => "measure_stop",
+            CommandKind::ClipboardRead => "clipboard_read",
+            CommandKind::ClipboardWrite => "clipboard_write",
             CommandKind::TraceStart => "trace_start",
             CommandKind::TraceStop => "trace_stop",
             CommandKind::ProfileStart => "profile_start",
@@ -215,6 +227,8 @@ impl CommandKind {
             | CommandKind::Targets
             | CommandKind::MeasureStart
             | CommandKind::MeasureStop
+            | CommandKind::ClipboardRead
+            | CommandKind::ClipboardWrite
             | CommandKind::TraceStart
             | CommandKind::TraceStop
             | CommandKind::ProfileStart
@@ -240,6 +254,8 @@ impl CommandKind {
             | CommandKind::Targets
             | CommandKind::MeasureStart
             | CommandKind::MeasureStop
+            | CommandKind::ClipboardRead
+            | CommandKind::ClipboardWrite
             | CommandKind::TraceStart
             | CommandKind::TraceStop
             | CommandKind::ProfileStart
@@ -266,6 +282,8 @@ impl CommandKind {
             | CommandKind::Hold
             | CommandKind::MeasureStart
             | CommandKind::MeasureStop
+            | CommandKind::ClipboardRead
+            | CommandKind::ClipboardWrite
             | CommandKind::TraceStart
             | CommandKind::TraceStop
             | CommandKind::ProfileStart
@@ -330,6 +348,11 @@ mod tests {
             Request::MeasureStop {
                 quiet_ms: 1000,
                 ceiling_ms: 10_000,
+            },
+            Request::ClipboardRead,
+            Request::ClipboardWrite {
+                text: "a".into(),
+                secret: false,
             },
             Request::TraceStart,
             Request::TraceStop,

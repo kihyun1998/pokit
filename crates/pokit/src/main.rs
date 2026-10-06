@@ -3,6 +3,7 @@
 mod cdp;
 mod chord;
 mod client;
+mod clipboard;
 mod clock;
 mod devtools;
 mod doctor;
@@ -65,6 +66,22 @@ enum MeasureAction {
         /// Milliseconds to wait for that before reporting the page unsettled.
         #[arg(long, default_value_t = 10_000)]
         ceiling: u64,
+    },
+}
+
+#[derive(Subcommand)]
+enum ClipboardAction {
+    /// The clipboard's text.
+    Read,
+    /// Put text on the clipboard, kept out of clipboard history and cloud sync.
+    Write {
+        text: Option<String>,
+        /// Read the text from stdin and mask it everywhere.
+        #[arg(long)]
+        secret: bool,
+        /// Read the text from this environment variable and mask it everywhere.
+        #[arg(long)]
+        secret_env: Option<String>,
     },
 }
 
@@ -195,6 +212,11 @@ enum Command {
     Measure {
         #[command(subcommand)]
         action: MeasureAction,
+    },
+    /// Read or write the clipboard's text; the user's clipboard is given back at `close`.
+    Clipboard {
+        #[command(subcommand)]
+        action: ClipboardAction,
     },
     /// Record a timeline trace around the commands run between `trace start` and `trace stop`.
     Trace {
@@ -379,36 +401,9 @@ fn dispatch(cli: Cli) -> (String, i32, Value) {
             into,
             require_focus,
         } => {
-            let (text, secret) = if let Some(var) = secret_env {
-                match std::env::var(&var) {
-                    Ok(v) => (v, true),
-                    Err(_) => {
-                        return outcome_json(
-                            "type",
-                            Err(Failure::new(
-                                Kind::Error,
-                                format!("environment variable {var} is not set"),
-                            )),
-                        )
-                    }
-                }
-            } else if secret {
-                let mut s = String::new();
-                let _ = std::io::stdin().read_to_string(&mut s);
-                (s.trim_end_matches(['\r', '\n']).to_string(), true)
-            } else {
-                match text {
-                    Some(t) => (t, false),
-                    None => {
-                        return outcome_json(
-                            "type",
-                            Err(Failure::new(
-                                Kind::Error,
-                                "type needs text, --secret or --secret-env",
-                            )),
-                        )
-                    }
-                }
+            let (text, secret) = match secret_text("type", text, secret, secret_env) {
+                Ok(t) => t,
+                Err(out) => return out,
             };
             Request::Type {
                 text,
@@ -458,6 +453,20 @@ fn dispatch(cli: Cli) -> (String, i32, Value) {
         } => Request::MeasureStop {
             quiet_ms: quiet,
             ceiling_ms: ceiling,
+        },
+        Command::Clipboard {
+            action: ClipboardAction::Read,
+        } => Request::ClipboardRead,
+        Command::Clipboard {
+            action:
+                ClipboardAction::Write {
+                    text,
+                    secret,
+                    secret_env,
+                },
+        } => match secret_text("clipboard_write", text, secret, secret_env) {
+            Ok((text, secret)) => Request::ClipboardWrite { text, secret },
+            Err(out) => return out,
         },
         Command::Trace {
             action: TraceAction::Start,
@@ -657,6 +666,41 @@ fn capabilities() -> output::Fields {
 
 fn unsupported() -> Value {
     json!({ "supported": false, "reason": "only the Windows backend exists so far; macOS is step 4 (#6)" })
+}
+
+/// The text a command was given: from stdin with `--secret`, from an environment variable with
+/// `--secret-env` (both masked everywhere), or as its argument.
+fn secret_text(
+    name: &str,
+    text: Option<String>,
+    secret: bool,
+    secret_env: Option<String>,
+) -> Result<(String, bool), (String, i32, Value)> {
+    if let Some(var) = secret_env {
+        return std::env::var(&var).map(|v| (v, true)).map_err(|_| {
+            outcome_json(
+                name,
+                Err(Failure::new(
+                    Kind::Error,
+                    format!("environment variable {var} is not set"),
+                )),
+            )
+        });
+    }
+    if secret {
+        let mut s = String::new();
+        let _ = std::io::stdin().read_to_string(&mut s);
+        return Ok((s.trim_end_matches(['\r', '\n']).to_string(), true));
+    }
+    text.map(|t| (t, false)).ok_or_else(|| {
+        outcome_json(
+            name,
+            Err(Failure::new(
+                Kind::Error,
+                format!("{name} needs text, --secret or --secret-env"),
+            )),
+        )
+    })
 }
 
 fn parse_env(pairs: &[String]) -> Result<Vec<(String, String)>, Failure> {
