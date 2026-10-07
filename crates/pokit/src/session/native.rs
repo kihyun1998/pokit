@@ -46,9 +46,10 @@ impl State {
 
     pub(super) async fn native_list_cmd(&self) -> Outcome {
         let pid = self.native_pid()?;
-        let (menus, dialogs) = blocking(move || {
+        let (menus, context, dialogs) = blocking(move || {
             let menus = crate::native::menus(pid);
-            crate::native::dialogs(pid).map(|d| (menus, d))
+            let context = crate::native::context_menu(pid);
+            crate::native::dialogs(pid).map(|d| (menus, context, d))
         })
         .await?;
         let mut text = String::new();
@@ -60,6 +61,10 @@ impl State {
                 json!({ "title": title, "menu": menu })
             })
             .collect();
+        if let Some(menu) = &context {
+            text.push_str("context menu:\n");
+            crate::native::render(menu, 1, &mut text);
+        }
         for d in &dialogs {
             text.push_str(&format!("dialog \"{}\":\n", d.title));
             for line in &d.text {
@@ -69,7 +74,12 @@ impl State {
                 text.push_str(&format!("  button \"{b}\"\n"));
             }
         }
-        Ok(fields! { "windows" => windows, "dialogs" => dialogs, "text" => text })
+        Ok(fields! {
+            "windows" => windows,
+            "context_menu" => context,
+            "dialogs" => dialogs,
+            "text" => text,
+        })
     }
 
     /// Gives the foreground back, for a while, whenever the app takes it in answer to a command.
@@ -78,9 +88,9 @@ impl State {
     fn keep_foreground_after(
         self: &Arc<Self>,
         pid: u32,
+        before: (isize, u32),
         during: &'static str,
     ) -> Arc<std::sync::Mutex<Instant>> {
-        let before = crate::proc::foreground();
         let until = Arc::new(std::sync::Mutex::new(Instant::now() + NATIVE_FOCUS_GRACE));
         let deadline = until.clone();
         tokio::spawn(super::launch::keep_foreground(
@@ -93,6 +103,25 @@ impl State {
         until
     }
 
+    /// The window to give the foreground back to after a context menu: the one in front now, or,
+    /// when the app is, the one in front at the click that opened the menu, which is forgotten
+    /// here.
+    fn foreground_before_menu(&self, pid: u32) -> (isize, u32) {
+        let at_click = self.foreground_at_click.lock().unwrap().take();
+        let now = crate::proc::foreground();
+        if now.1 == pid {
+            at_click.unwrap_or(now)
+        } else {
+            now
+        }
+    }
+
+    /// The window the command line is to give the foreground back to, while the app holds it.
+    fn give_back_field(&self, pid: u32, before: (isize, u32)) -> Option<serde_json::Value> {
+        (before.0 != 0 && before.1 != pid && crate::proc::foreground().1 == pid)
+            .then(|| json!({ "hwnd": before.0, "pid": before.1, "app_pid": pid }))
+    }
+
     pub(super) async fn native_choose_cmd(self: &Arc<Self>, path: &str) -> Outcome {
         let pid = self.native_pid()?;
         let parts = crate::native::parse_path(path);
@@ -102,16 +131,53 @@ impl State {
                 "native choose needs a path like `File > Open`",
             ));
         }
-        let keeping = self.keep_foreground_after(pid, "after a menu choice");
+        let in_menu = blocking(move || Ok(crate::native::context_menu_open(pid))).await?;
+        let before = if in_menu {
+            self.foreground_before_menu(pid)
+        } else {
+            crate::proc::foreground()
+        };
+        let keeping =
+            (!in_menu).then(|| self.keep_foreground_after(pid, before, "after a menu choice"));
         let chosen = tokio::task::spawn_blocking(move || crate::native::choose(pid, &parts))
             .await
             .map_err(|e| Failure::new(Kind::Error, format!("the native UI call failed: {e}")))?;
-        *keeping.lock().unwrap() = Instant::now() + NATIVE_FOCUS_GRACE;
+        match keeping {
+            Some(k) => *k.lock().unwrap() = Instant::now() + NATIVE_FOCUS_GRACE,
+            None => {
+                self.keep_foreground_after(pid, before, "after a context menu choice");
+            }
+        }
         let window = chosen.map_err(|e| match e {
             crate::native::Refusal::Missing(m) => Failure::new(Kind::NotFound, m),
             crate::native::Refusal::Refused(m) => Failure::new(Kind::Error, m),
         })?;
-        Ok(fields! { "chosen" => path, "window" => window })
+        let mut f = fields! { "chosen" => path, "window" => window };
+        if f["window"] == "context menu" {
+            if let Some(g) = self.give_back_field(pid, before) {
+                f.insert("give_back".into(), g);
+            }
+        }
+        Ok(f)
+    }
+
+    /// `native dismiss`: closes the open context menu, and gives the foreground back.
+    pub(super) async fn native_dismiss_cmd(self: &Arc<Self>) -> Outcome {
+        let pid = self.native_pid()?;
+        let before = self.foreground_before_menu(pid);
+        let closed = tokio::task::spawn_blocking(move || crate::native::dismiss(pid))
+            .await
+            .map_err(|e| Failure::new(Kind::Error, format!("the native UI call failed: {e}")))?;
+        self.keep_foreground_after(pid, before, "after a context menu closed");
+        let levels = closed.map_err(|e| match e {
+            crate::native::Refusal::Missing(m) => Failure::new(Kind::NotFound, m),
+            crate::native::Refusal::Refused(m) => Failure::new(Kind::Error, m),
+        })?;
+        let mut f = fields! { "dismissed" => "context menu", "levels" => levels };
+        if let Some(g) = self.give_back_field(pid, before) {
+            f.insert("give_back".into(), g);
+        }
+        Ok(f)
     }
 
     pub(super) async fn native_answer_cmd(
@@ -120,7 +186,8 @@ impl State {
         dialog: Option<&str>,
     ) -> Outcome {
         let pid = self.native_pid()?;
-        let keeping = self.keep_foreground_after(pid, "after a dialog answer");
+        let keeping =
+            self.keep_foreground_after(pid, crate::proc::foreground(), "after a dialog answer");
         let (button, dialog) = (button.to_string(), dialog.map(str::to_string));
         let answered = tokio::task::spawn_blocking(move || {
             crate::native::answer(pid, &button, dialog.as_deref())

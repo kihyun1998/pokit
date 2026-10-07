@@ -1,6 +1,6 @@
 # Reaching an app's native UI
 
-How `native list`, `native choose` and `native answer` read and operate a launched app's menu bars and dialogs on Windows. Code: `native::menus`, `native::choose`, `native::dialogs`, `native::answer`, `native::clean_label`, `native::button_matches` (native.rs), `State::native_*_cmd`, `State::keep_foreground_after` (session/native.rs), `launch::keep_foreground`.
+How `native list`, `native choose`, `native dismiss` and `native answer` read and operate a launched app's menu bars, context menus and dialogs on Windows. Code: `native::menus`, `native::choose`, `native::context_menu`, `native::dismiss`, `native::dialogs`, `native::answer`, `native::clean_label`, `native::button_matches` (native.rs), `State::native_*_cmd`, `State::keep_foreground_after` (session/native.rs), `launch::keep_foreground`.
 
 ## Design model
 
@@ -12,9 +12,26 @@ How `native list`, `native choose` and `native answer` read and operate a launch
 - **What pokit sets off in the app does not keep the foreground.** A dialog activates itself when it opens, and the app regains the foreground when it closes, both with the right inherited from the terminal in front ([[launching-a-test-instance]]). Measured 2026-10-06: after `native choose "Help > Ask"`, the fixture held the foreground for about 2.1 s. So from the start of `native choose` and `native answer` until 2 s after each returns, the session gives the foreground back whenever the app takes it, as it does during `launch`; after that change the fixture never showed up in front. *Derivation, not a maintainer's call:* this extends the launch give-back the maintainer chose (#1 story 42) to the native commands, with the same best-effort limit.
 - **An attached session cannot reach the native UI** (exit 7). It does not know the app's process, and the native UI is found by process.
 - **A page's own `alert`, `confirm` and `prompt` are not native UI here.** WebView2 draws them in its own browser process, not as the app's `#32770` windows, so `native` does not see them.
-- **Not covered yet:** context menus (muda calls `SetForegroundWindow` before `TrackPopupMenu`, so they need the app in front), the tray, and the file dialog. They wait for #5's activation command.
+- **A context menu is read from its menu window, and chosen in by the keyboard's messages.** The app opens it (the fixture on a right-click, through `popup_menu`); it is a `#32768` window of the app, and `MN_GETHMENU` gives the menu it shows, read like a menu bar. `native list` reports it as `context_menu`.
+  - muda shows it with `TPM_RETURNCMD` and acts on the id `TrackPopupMenu` returns (`muda` 0.20.0 `platform_impl/windows/mod.rs` 906–936), so a posted `WM_COMMAND`, as for a menu bar, does nothing: measured, the entry did not run. UI Automation found no entries under the menu window either.
+  - pokit highlights each entry on the path with `MN_SELECTITEM` (its position, separators counted), opens a submenu with a posted Right key, and takes the last with a posted Enter, as the keyboard would. It works with the app behind (measured 2026-10-07).
+  - While a context menu is open, `native choose` chooses in it, and a path that is not in it is not found (exit 5) rather than chosen in the menu bar.
+  - A menu bar's dropped-down menu is also a `#32768` window; it is told apart by its menu being one of the bar's submenus, and left out. Not tested: dropping a bar menu down needs a click on the app in front.
+  - The first level is the menu window whose menu is no other open menu's submenu, and a submenu's window is the one showing that entry's submenu, already open or opened with Right; neither relies on the windows' order. Each entry on the path must be enabled.
+  - `native dismiss` closes it with Escape, a level at a time.
+- **A context menu takes the foreground, and pokit gives it back after `native choose` or `native dismiss` closes it.** muda calls `SetForegroundWindow` before `TrackPopupMenu`, so a right-click that opens the menu, even over CDP, brings the app to the front when Windows lets it. **Maintainer's call (2026-10-07, #5):** give the foreground back, as after a dialog, rather than refuse context menus unless the app was activated first, or offer both.
+  - The window given back to is the one in front at the last click (`foreground_at_click`), since by the time of the choice the app is. It is used only when a context menu is open, and forgotten once used; `native answer` and a menu bar choice give back to the window in front when they start, as before.
+  - The session's give-back starts only after the menu has closed: taking the foreground from the app while its menu is open could close the menu mid-choice.
+  - A refused give-back is logged once until one succeeds, not every 50 ms.
+  - The session could not do it: after the first time, Windows refused its `SetForegroundWindow` 66 times in a row, with or without attaching to the app's input. A process started from the terminal in front could, at once. So the session hands the window back in its answer (`give_back`), and the command line, started from that terminal, sets it, retrying for up to a second; the result says `foreground_given_back`.
+  - Measured 2026-10-07 over six right-clicks in one session: the app took the foreground at the first two and was given it back each time; at the next four Windows did not let it take the foreground at all.
+- **`capabilities` says it** for `native`: a context menu the app opens holds the foreground while it is open.
+- **A page's own context menu is not native UI.** WebView2 draws it in its browser process; only a menu the app opens, after the page prevents the default, is the app's.
+- **Not covered yet:** the tray and the file dialog.
 
 ## Testing
+
+- `a_context_menu_is_read_chosen_in_and_dismissed` checks the foreground came back only when the app took it at the menu's opening, observed rather than predicted, and so tests nothing about it in a run where Windows kept the app back at both openings (it prints which); it holds `FOCUS` with the dialog's focus test so neither moves the foreground under the other: `window::can_take_foreground` said it could not while it did ([[sending-os-input]], #48). Reddened 2026-10-07: falling through to the menu bar, Escape for Enter, no Escape on dismiss, choosing a disabled entry, and dropping the command line's give-back each turned it red.
 
 - `tests/native.rs` takes button names from `native list`, because they follow the system's language.
 - `a_dialog_the_app_opens_does_not_keep_the_foreground` only tests anything when it descends from the foreground app (`window::can_take_foreground`). With the terminal's window owned by a sibling process of the shell's ancestor, it returns; a mutation removing the give-back after `native choose` could not be tried that way (2026-10-07).

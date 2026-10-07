@@ -40,6 +40,26 @@ async fn open_dropped(app: tauri::AppHandle, x: f64, y: f64) -> Result<(), Strin
         .map_err(|e| e.to_string())
 }
 
+/// Pops up the page's context menu at the cursor: Mark here, a disabled entry, and a submenu
+/// with Deeper.
+#[tauri::command]
+fn show_context_menu(window: tauri::Window) -> Result<(), String> {
+    use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
+    let build = || -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+        let mark = MenuItemBuilder::with_id("ctx-mark", "&Mark here").build(&window)?;
+        let off = MenuItemBuilder::with_id("ctx-off", "Cannot")
+            .enabled(false)
+            .build(&window)?;
+        let deeper = MenuItemBuilder::with_id("ctx-deeper", "Deeper").build(&window)?;
+        let more = SubmenuBuilder::new(&window, "More").item(&deeper).build()?;
+        MenuBuilder::new(&window)
+            .items(&[&mark, &off, &more])
+            .build()
+    };
+    let menu = build().map_err(|e| e.to_string())?;
+    window.popup_menu(&menu).map_err(|e| e.to_string())
+}
+
 /// Hides the main window's webview for `ms` milliseconds, as a host does when its window is
 /// minimized (`IsVisible` false), without touching the window itself.
 #[tauri::command]
@@ -180,6 +200,8 @@ fn main() {
             app.on_menu_event(|app, event| match event.id().as_ref() {
                 "hello" => show_native_result(app, "hello from the menu"),
                 "ask" => ask_in_a_dialog(app.clone()),
+                "ctx-mark" => show_native_result(app, "marked from the context menu"),
+                "ctx-deeper" => show_native_result(app, "deeper from the context menu"),
                 _ => {}
             });
             if std::env::args().any(|a| a == "--take-focus") {
@@ -194,6 +216,7 @@ fn main() {
             backend_log,
             open_second,
             open_dropped,
+            show_context_menu,
             hide_webview_for
         ])
         .run(tauri::generate_context!())

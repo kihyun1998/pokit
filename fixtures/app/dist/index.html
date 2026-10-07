@@ -59,6 +59,7 @@
   <section id="pane-native">
     <h2>Native</h2>
     <p id="native-result" role="status"></p>
+    <div id="context-target" style="padding: 8px; border: 1px dashed #999">Right-click me</div>
   </section>
 
   <section id="pane-drag">
@@ -153,6 +154,12 @@
       } else {
         $('drag-result').textContent = `in at ${Math.round(e.clientX)},${Math.round(e.clientY)}`;
       }
+    });
+    // A right-click on #context-target pops up the app's native context menu instead of the
+    // webview's own.
+    $('context-target').addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      invoke('show_context_menu');
     });
     // Every wheel turn over the scroller, with its delta.
     $('scroller').addEventListener('wheel', (e) => window.__events.push([Math.round(performance.now()), 'wheel', 'scroller', String(e.deltaY)]));
