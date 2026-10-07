@@ -110,6 +110,18 @@ enum NativeAction {
     Choose { path: String },
     /// Close the context menu the app has open without choosing anything.
     Dismiss,
+    /// Click the app's tray icon (Tauri's tray), as the mouse on it would. A menu it opens, on a
+    /// right click or, as Tauri does by default, a left one, is reached by `list` and `choose` as
+    /// the context menu, at the user's cursor.
+    Tray {
+        /// Which tray icon, from 0, when the app has more than one.
+        #[arg(long, default_value_t = 0)]
+        index: usize,
+        #[arg(long, conflicts_with = "double")]
+        right: bool,
+        #[arg(long)]
+        double: bool,
+    },
     /// Press a button in a dialog the app has open.
     Answer {
         button: String,
@@ -658,6 +670,18 @@ fn dispatch(cli: Cli) -> (String, i32, Value) {
         Command::Native {
             action: NativeAction::Dismiss,
         } => Request::NativeDismiss,
+        Command::Native {
+            action:
+                NativeAction::Tray {
+                    index,
+                    right,
+                    double,
+                },
+        } => Request::NativeTray {
+            index,
+            right,
+            double,
+        },
         Command::Clipboard {
             action: ClipboardAction::Read,
         } => Request::ClipboardRead,
@@ -892,7 +916,8 @@ fn capabilities() -> output::Fields {
             "native" if cfg!(windows) => json!({
                 "supported": true,
                 "route": output::ENGINE,
-                "takes_focus": "a context menu the app opens holds the foreground while it is open;                                 `native choose` and `native dismiss` give it back",
+                "takes_focus": "a context or tray menu the app opens holds the foreground while it is                                 open; `native choose` and `native dismiss` give it back",
+                "tray": "icons made with tray-icon (Tauri's tray) only",
             }),
             "capture" if cfg!(windows) => json!({
                 "supported": true,

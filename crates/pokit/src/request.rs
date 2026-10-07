@@ -128,6 +128,14 @@ pub enum Request {
         dialog: Option<String>,
     },
     NativeDismiss,
+    NativeTray {
+        #[serde(default)]
+        index: usize,
+        #[serde(default)]
+        right: bool,
+        #[serde(default)]
+        double: bool,
+    },
     TraceStart,
     TraceStop,
     ProfileStart {
@@ -185,6 +193,7 @@ pub enum CommandKind {
     NativeChoose,
     NativeAnswer,
     NativeDismiss,
+    NativeTray,
     TraceStart,
     TraceStop,
     ProfileStart,
@@ -235,6 +244,7 @@ impl Request {
             Request::NativeChoose { .. } => CommandKind::NativeChoose,
             Request::NativeAnswer { .. } => CommandKind::NativeAnswer,
             Request::NativeDismiss => CommandKind::NativeDismiss,
+            Request::NativeTray { .. } => CommandKind::NativeTray,
             Request::TraceStart => CommandKind::TraceStart,
             Request::TraceStop => CommandKind::TraceStop,
             Request::ProfileStart { .. } => CommandKind::ProfileStart,
@@ -314,6 +324,7 @@ impl CommandKind {
             CommandKind::NativeChoose => "native_choose",
             CommandKind::NativeAnswer => "native_answer",
             CommandKind::NativeDismiss => "native_dismiss",
+            CommandKind::NativeTray => "native_tray",
             CommandKind::TraceStart => "trace_start",
             CommandKind::TraceStop => "trace_stop",
             CommandKind::ProfileStart => "profile_start",
@@ -354,6 +365,7 @@ impl CommandKind {
             | CommandKind::NativeChoose
             | CommandKind::NativeAnswer
             | CommandKind::NativeDismiss
+            | CommandKind::NativeTray
             | CommandKind::TraceStart
             | CommandKind::TraceStop
             | CommandKind::ProfileStart
@@ -390,6 +402,7 @@ impl CommandKind {
             | CommandKind::NativeChoose
             | CommandKind::NativeAnswer
             | CommandKind::NativeDismiss
+            | CommandKind::NativeTray
             | CommandKind::TraceStart
             | CommandKind::TraceStop
             | CommandKind::ProfileStart
@@ -427,6 +440,7 @@ impl CommandKind {
             | CommandKind::NativeChoose
             | CommandKind::NativeAnswer
             | CommandKind::NativeDismiss
+            | CommandKind::NativeTray
             | CommandKind::TraceStart
             | CommandKind::TraceStop
             | CommandKind::ProfileStart
@@ -534,6 +548,11 @@ mod tests {
                 dialog: None,
             },
             Request::NativeDismiss,
+            Request::NativeTray {
+                index: 1,
+                right: true,
+                double: false,
+            },
             Request::TraceStart,
             Request::TraceStop,
             Request::ProfileStart { interval_us: 100 },

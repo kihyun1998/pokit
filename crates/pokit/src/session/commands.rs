@@ -208,11 +208,18 @@ impl State {
             }
             #[cfg(windows)]
             Request::NativeDismiss => self.native_dismiss_cmd().await,
+            #[cfg(windows)]
+            Request::NativeTray {
+                index,
+                right,
+                double,
+            } => self.native_tray_cmd(*index, *right, *double).await,
             #[cfg(not(windows))]
             Request::NativeList
             | Request::NativeChoose { .. }
             | Request::NativeAnswer { .. }
-            | Request::NativeDismiss => Err(Failure::new(
+            | Request::NativeDismiss
+            | Request::NativeTray { .. } => Err(Failure::new(
                 Kind::Unsupported,
                 "native UI is not built on this platform yet",
             )),

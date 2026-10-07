@@ -290,3 +290,50 @@ fn a_context_menu_is_read_chosen_in_and_dismissed() {
     let r = p.run(&["native", "dismiss"]);
     assert_eq!(r.code, 5, "dismiss with no context menu open: {}", r.out);
 }
+
+#[test]
+fn the_tray_icon_is_clicked_and_its_menu_chosen_in() {
+    let _focus = FOCUS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut p = Pokit::new("native-tray");
+    let exe = fixture_exe().to_str().unwrap().to_string();
+    let r = p.run(&["launch", &exe, "--", "--tray"]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    p.launched = Some(r.out);
+    let before = window::foreground();
+    assert_eq!(p.run(&["native", "list"]).out["tray_icons"], 1);
+
+    let r = p.run(&["native", "tray"]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert!(
+        eventually(3000, || native_result(&p) == "the tray icon was clicked"),
+        "{:?}",
+        native_result(&p)
+    );
+    assert_eq!(
+        window::foreground(),
+        before,
+        "a left click on the tray icon moved the foreground"
+    );
+
+    let r = p.run(&["native", "tray", "--right"]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    let mut menu = Value::Null;
+    assert!(
+        eventually(5000, || {
+            menu = p.run(&["native", "list"]).out["context_menu"].clone();
+            !menu.is_null()
+        }),
+        "a right click on the tray icon opened no menu"
+    );
+    let took = window::window_pid(window::foreground()) == p.app_pid();
+    assert_eq!(menu[0]["label"], "Note from the tray", "{menu}");
+    assert_eq!(menu[1]["enabled"], false, "{menu}");
+    let r = p.run(&["native", "choose", "Note from the tray"]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert!(eventually(3000, || native_result(&p) == "noted from the tray"));
+    assert!(
+        !took || eventually(2500, || window::foreground() == before),
+        "the tray menu kept the foreground"
+    );
+    eprintln!("the app took the foreground at the tray menu: {took}");
+}
