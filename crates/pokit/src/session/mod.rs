@@ -8,6 +8,8 @@ mod logs;
 mod measure;
 #[cfg(windows)]
 mod native;
+#[cfg(windows)]
+mod os_input;
 mod pages;
 mod profiling;
 mod record;
@@ -101,6 +103,7 @@ struct State {
     /// Commands waiting for one event from one target.
     waiters: Mutex<Vec<pages::Waiter>>,
     /// What the session did to the user's clipboard.
+    #[cfg_attr(not(windows), allow(dead_code))]
     clipboard: Mutex<clipboard::ClipboardState>,
     /// How many times the app took the foreground during launch and was made to give it back,
     /// and how many times Windows refused that.
