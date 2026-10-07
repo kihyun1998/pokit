@@ -48,7 +48,7 @@ fn ref_of(snapshot: &str, line_start: &str) -> String {
 
 #[test]
 fn a_form_is_filled_through_refs_submitted_and_its_result_read_back() {
-    let p = Pokit::launch_fixture("form");
+    let p = shared_fixture();
     let snap = p.run(&["snapshot"]);
     assert_eq!(snap.code, 0, "{}", snap.out);
     let text = snap.out["snapshot"].as_str().unwrap();
@@ -73,7 +73,7 @@ fn a_form_is_filled_through_refs_submitted_and_its_result_read_back() {
 
 #[test]
 fn a_ref_from_an_earlier_snapshot_is_refused_by_name() {
-    let p = Pokit::launch_fixture("stale");
+    let p = shared_fixture();
     let first = p.run(&["snapshot"]);
     let old = ref_of(first.out["snapshot"].as_str().unwrap(), "textbox \"Name\"");
     p.run(&["click", "#show-later"]);
@@ -92,13 +92,10 @@ fn a_ref_from_an_earlier_snapshot_is_refused_by_name() {
 
 #[test]
 fn wait_holds_until_an_element_appears_and_times_out_on_one_that_never_comes() {
-    let p = Pokit::launch_fixture("wait");
+    let p = shared_fixture();
     let home = p.home.clone();
     let waiter = std::thread::spawn(move || {
-        let w = Pokit {
-            home,
-            launched: None,
-        };
+        let w = Pokit::on_home(home);
         w.run(&["wait", "--selector", "#on-demand", "--for", "30000"])
     });
     std::thread::sleep(std::time::Duration::from_millis(1000));
@@ -122,7 +119,7 @@ fn wait_holds_until_an_element_appears_and_times_out_on_one_that_never_comes() {
 
 #[test]
 fn input_is_refused_when_focus_is_outside_the_required_target() {
-    let p = Pokit::launch_fixture("guard");
+    let p = shared_fixture();
     let r = p.run(&[
         "type",
         "x",
@@ -201,7 +198,7 @@ fn page_errors_and_backend_output_reach_logs() {
 
 #[test]
 fn a_second_window_is_listed_and_can_be_switched_to() {
-    let p = Pokit::launch_fixture("windows");
+    let p = shared_fixture();
     p.run(&["click", "#open-second"]);
     // Waits for the second window by its URL.
     let listed = eventually(5000, || {
@@ -269,7 +266,7 @@ fn an_idle_session_ends_and_closes_the_instance_it_launched() {
 
 #[test]
 fn chords_and_mouse_variants_reach_the_page_as_the_page_reports_them() {
-    let p = Pokit::launch_fixture("input");
+    let p = shared_fixture();
     p.run(&["click", "#target"]);
     assert_eq!(p.run(&["key", "Ctrl+KeyK"]).code, 0);
     assert_eq!(p.run(&["read", "#last-key"]).out["text"], "Ctrl+KeyK");
@@ -293,7 +290,7 @@ fn chords_and_mouse_variants_reach_the_page_as_the_page_reports_them() {
 
 #[test]
 fn capture_writes_a_png_of_the_page_or_one_element() {
-    let p = Pokit::launch_fixture("capture");
+    let p = shared_fixture();
     let page = p.run(&["capture"]);
     assert_eq!(page.code, 0, "{}", page.out);
     let element = p.run(&["capture", "#submit"]);
@@ -361,7 +358,7 @@ fn a_usage_error_is_still_one_json_object_with_the_usage_code() {
 
 #[test]
 fn refused_input_leaves_focus_where_it_was() {
-    let p = Pokit::launch_fixture("guard-focus");
+    let p = shared_fixture();
     p.run(&["click", "#other-input"]);
     let r = p.run(&[
         "type",
@@ -381,7 +378,7 @@ fn refused_input_leaves_focus_where_it_was() {
 
 #[test]
 fn wait_on_a_broken_expression_fails_at_once_instead_of_waiting_out_its_timeout() {
-    let p = Pokit::launch_fixture("wait-broken");
+    let p = shared_fixture();
     let r = p.run(&[
         "wait",
         "--expr",
@@ -516,7 +513,7 @@ fn a_process_squatting_on_the_session_port_never_receives_the_token_or_a_secret(
 
 #[test]
 fn a_relative_capture_path_is_relative_to_where_the_command_ran() {
-    let p = Pokit::launch_fixture("capture-rel");
+    let p = shared_fixture();
     let dir = p.home.join("caller");
     std::fs::create_dir_all(&dir).unwrap();
     let r = p.run_in(&dir, &["capture", "--out", "shot.png"], None);
@@ -562,7 +559,7 @@ fn launch_removes_profiles_left_by_ended_sessions_and_keeps_its_own() {
 
 #[test]
 fn a_chord_can_be_sent_into_an_element() {
-    let p = Pokit::launch_fixture("key-into");
+    let p = shared_fixture();
     let r = p.run(&["key", "Shift+KeyA", "--into", "#name"]);
     assert_eq!(r.code, 0, "{}", r.out);
     assert_eq!(p.run(&["read", "#name"]).out["value"], "A");
@@ -570,7 +567,7 @@ fn a_chord_can_be_sent_into_an_element() {
 
 #[test]
 fn a_chord_on_cdp_presses_its_modifiers_as_keys_like_a_keyboard() {
-    let p = Pokit::launch_fixture("cdp-modifiers");
+    let p = shared_fixture();
     assert_eq!(p.run(&["eval", "window.__events.length = 0"]).code, 0);
     let r = p.run(&["key", "Ctrl+KeyK", "--into", "#name"]);
     assert_eq!(r.code, 0, "{}", r.out);
@@ -591,7 +588,7 @@ fn a_chord_on_cdp_presses_its_modifiers_as_keys_like_a_keyboard() {
 
 #[test]
 fn a_drag_on_cdp_moves_the_pointer_within_the_page_and_refuses_to_leave_it() {
-    let p = Pokit::launch_fixture("drag-cdp");
+    let p = shared_fixture();
     let r = p.run(&[
         "drag", "#drag-me", "--to-x", "300", "--to-y", "200", "--steps", "8",
     ]);

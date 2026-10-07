@@ -1,4 +1,5 @@
-//! Drives the real `pokit` binary against the fixture app, each test in its own pokit home.
+//! Drives the real `pokit` binary against the fixture app: a test either in its own pokit home
+//! with its own instance, or on the instance its test binary shares, one test at a time.
 
 #![allow(dead_code)]
 
@@ -6,9 +7,10 @@
 pub mod window;
 
 use serde_json::Value;
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
+use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -52,20 +54,82 @@ pub struct Run {
     pub out: Value,
 }
 
-/// One pokit home with, once launched, one session on the fixture app; closed on drop.
+static BUSY: Mutex<bool> = Mutex::new(false);
+static FREE: Condvar = Condvar::new();
+thread_local! {
+    static HELD: Cell<u32> = const { Cell::new(0) };
+}
+
+/// A test's turn with the fixture apps: one test of a test binary at a time launches or drives
+/// one. Taken again on a thread that holds it, it is held until the last is dropped.
+pub struct Turn(());
+
+impl Turn {
+    pub fn take() -> Turn {
+        HELD.with(|held| {
+            if held.get() == 0 {
+                let mut busy = BUSY.lock().unwrap_or_else(|e| e.into_inner());
+                while *busy {
+                    busy = FREE.wait(busy).unwrap_or_else(|e| e.into_inner());
+                }
+                *busy = true;
+            }
+            held.set(held.get() + 1);
+        });
+        Turn(())
+    }
+}
+
+impl Drop for Turn {
+    fn drop(&mut self) {
+        HELD.with(|held| {
+            held.set(held.get() - 1);
+            if held.get() == 0 {
+                *BUSY.lock().unwrap_or_else(|e| e.into_inner()) = false;
+                FREE.notify_one();
+            }
+        });
+    }
+}
+
+/// One pokit home with, once launched, one session on the fixture app; closed on drop. A test's
+/// own holds the test's turn.
 pub struct Pokit {
     pub home: PathBuf,
     pub launched: Option<Value>,
+    turn: Option<Turn>,
+    /// Whether dropping it removes the home.
+    owns_home: bool,
 }
 
 impl Pokit {
     pub fn new(name: &str) -> Self {
+        let turn = Turn::take();
+        let mut p = Pokit::unturned(name);
+        p.turn = Some(turn);
+        p
+    }
+
+    /// Another handle on an existing home, for running commands from a second thread; dropping
+    /// it leaves the home and its session alone.
+    pub fn on_home(home: PathBuf) -> Self {
+        Pokit {
+            home,
+            launched: None,
+            turn: None,
+            owns_home: false,
+        }
+    }
+
+    fn unturned(name: &str) -> Self {
         let home = std::env::temp_dir().join(format!("pokit-test-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).unwrap();
         Pokit {
             home,
             launched: None,
+            turn: None,
+            owns_home: true,
         }
     }
 
@@ -85,6 +149,20 @@ impl Pokit {
 
     pub fn run(&self, args: &[&str]) -> Run {
         self.run_with_stdin(args, None)
+    }
+
+    /// The value of `expression` on the page, or `Null` whatever goes wrong: for reporting on a
+    /// test that is already failing.
+    fn eval_quietly(&self, expression: &str) -> Value {
+        Command::new(env!("CARGO_BIN_EXE_pokit"))
+            .args(["eval", expression])
+            .env("POKIT_HOME", &self.home)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()
+            .and_then(|o| serde_json::from_slice::<Value>(&o.stdout).ok())
+            .map_or(Value::Null, |v| v["value"].clone())
     }
 
     pub fn run_with_stdin(&self, args: &[&str], stdin: Option<&str>) -> Run {
@@ -175,14 +253,10 @@ impl Drop for Pokit {
     fn drop(&mut self) {
         // A failing test prints what the page received, and whether it reloaded since launch.
         if let (true, Some(launched)) = (std::thread::panicking(), &self.launched) {
-            let page = self
-                .run(&[
-                    "eval",
-                    "JSON.stringify({ origin: performance.timeOrigin, active: document.activeElement?.id, \
-                     focus: document.hasFocus(), events: window.__events })",
-                ])
-                .out["value"]
-                .clone();
+            let page = self.eval_quietly(
+                "JSON.stringify({ origin: performance.timeOrigin, active: document.activeElement?.id, \
+                 focus: document.hasFocus(), events: window.__events })",
+            );
             eprintln!(
                 "page at failure (home {}, time origin at launch {}): {page}",
                 self.home.display(),
@@ -190,22 +264,140 @@ impl Drop for Pokit {
             );
         }
         if self.launched.is_some() {
-            let _ = Command::new(env!("CARGO_BIN_EXE_pokit"))
-                .arg("close")
-                .env("POKIT_HOME", &self.home)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+            close_home(&self.home);
         }
-        // A passing test's home is removed; it holds the instance's WebView2 profile until its processes exit.
-        for _ in 0..30 {
-            if std::thread::panicking() {
-                break;
+        if self.owns_home && !std::thread::panicking() {
+            remove_home(&self.home);
+        }
+    }
+}
+
+fn close_home(home: &Path) {
+    let _ = Command::new(env!("CARGO_BIN_EXE_pokit"))
+        .arg("close")
+        .env("POKIT_HOME", home)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// Removes a home, retrying for up to 3 s while the instance's WebView2 processes still hold its
+/// profile.
+fn remove_home(home: &Path) {
+    for _ in 0..30 {
+        if std::fs::remove_dir_all(home).is_ok() || !home.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+/// The fixture instance this test binary shares, ready for one test: the page reloaded and
+/// scrolled to the top. It is launched again when the last test left the app in a state a reload
+/// does not undo (another window, a dialog, a menu) or its session ended. It is closed, and its
+/// home removed, when the test binary exits; its session also ends after `SHARED_IDLE` without
+/// commands.
+pub struct Shared {
+    app: MutexGuard<'static, Option<Pokit>>,
+    _turn: Turn,
+}
+
+/// How long the shared instance outlives its last command.
+const SHARED_IDLE: &str = "20";
+
+static SHARED: Mutex<Option<Pokit>> = Mutex::new(None);
+
+pub fn shared_fixture() -> Shared {
+    let turn = Turn::take();
+    let mut app = SHARED.lock().unwrap_or_else(|e| e.into_inner());
+    if !app.as_ref().is_some_and(reset) {
+        *app = None;
+        let mut p = Pokit::unturned("shared");
+        let exe = if cfg!(target_os = "macos") {
+            fixture_test_build_exe()
+        } else {
+            fixture_exe()
+        };
+        let r = p.run(&[
+            "launch",
+            exe.to_str().unwrap(),
+            "--idle-timeout",
+            SHARED_IDLE,
+        ]);
+        assert_eq!(r.code, 0, "the shared instance did not launch: {}", r.out);
+        p.launched = Some(r.out);
+        *app = Some(p);
+        static AT_EXIT: OnceLock<()> = OnceLock::new();
+        AT_EXIT.get_or_init(|| {
+            extern "C" {
+                fn atexit(f: extern "C" fn()) -> i32;
             }
-            if std::fs::remove_dir_all(&self.home).is_ok() || !self.home.exists() {
-                break;
+            // SAFETY: registers a plain function to run when the process exits.
+            unsafe { atexit(close_shared) };
+        });
+    }
+    Shared { app, _turn: turn }
+}
+
+/// Closes the shared instance as the test binary exits.
+extern "C" fn close_shared() {
+    let app = match SHARED.try_lock() {
+        Ok(app) => app,
+        Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return,
+    };
+    if let Some(p) = app.as_ref() {
+        close_home(&p.home);
+        remove_home(&p.home);
+    }
+}
+
+/// Puts the shared instance back as launched, for the next test; whether it could.
+fn reset(p: &Pokit) -> bool {
+    let targets = p.run(&["targets"]);
+    if targets.code != 0 || targets.out["targets"].as_array().map(Vec::len) != Some(1) {
+        return false;
+    }
+    let native = p.run(&["native", "list"]);
+    if native.code == 0
+        && (native.out["dialogs"]
+            .as_array()
+            .is_some_and(|d| !d.is_empty())
+            || !native.out["context_menu"].is_null())
+    {
+        return false;
+    }
+    for stop in [["measure", "stop"], ["trace", "stop"], ["profile", "stop"]] {
+        p.run(&stop);
+    }
+    let origin = p.run(&["eval", "performance.timeOrigin"]).out["value"].clone();
+    if p.run(&["eval", "location.reload(); true"]).code != 0 {
+        return false;
+    }
+    eventually(10_000, || {
+        let now = p.run(&["eval", "performance.timeOrigin"]);
+        now.code == 0 && now.out["value"] != origin
+    }) && p.run(&["eval", "window.scrollTo(0, 0); true"]).code == 0
+}
+
+impl std::ops::Deref for Shared {
+    type Target = Pokit;
+
+    fn deref(&self) -> &Pokit {
+        self.app.as_ref().expect("a shared instance")
+    }
+}
+
+impl Drop for Shared {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            if let Some(p) = self.app.as_ref() {
+                let page = p.eval_quietly("JSON.stringify(window.__events)");
+                eprintln!(
+                    "shared instance at failure (home {}): {page}",
+                    p.home.display()
+                );
             }
-            std::thread::sleep(std::time::Duration::from_millis(100));
         }
     }
 }
