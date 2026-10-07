@@ -271,6 +271,28 @@ enum Command {
         #[arg(long)]
         compare: bool,
     },
+    /// Drag from an element to another or to a page point, with the left button held. Through
+    /// the OS the path may leave the window, as a hand's can.
+    Drag {
+        from: String,
+        /// The element to drop on, which must be in view.
+        #[arg(long, conflicts_with_all = ["to_x", "to_y"], required_unless_present = "to_x")]
+        to: Option<String>,
+        /// The page point to drop at, in CSS pixels; outside the page needs `--route os`.
+        #[arg(long, allow_hyphen_values = true, value_parser = finite, requires = "to_y")]
+        to_x: Option<f64>,
+        #[arg(long, allow_hyphen_values = true, value_parser = finite, requires = "to_x")]
+        to_y: Option<f64>,
+        /// A page point the path passes through, `X,Y`; repeat for more.
+        #[arg(long, allow_hyphen_values = true, value_parser = point)]
+        via: Vec<(f64, f64)>,
+        /// Pointer moves on each straight part of the path.
+        #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u32).range(1..=1000))]
+        steps: u32,
+        /// `os` drags through the OS, which needs the app in front and moves the cursor.
+        #[arg(long, value_enum, default_value_t = request::Route::Cdp)]
+        route: request::Route,
+    },
     /// Turn the mouse wheel over an element or a point, or the middle of the page.
     Wheel {
         target: Option<String>,
@@ -552,6 +574,23 @@ fn dispatch(cli: Cli) -> (String, i32, Value) {
             require_focus,
             route,
             compare,
+        },
+        Command::Drag {
+            from,
+            to,
+            to_x,
+            to_y,
+            via,
+            steps,
+            route,
+        } => Request::Drag {
+            from,
+            to,
+            to_x,
+            to_y,
+            via,
+            steps,
+            route,
         },
         Command::Wheel {
             target,
@@ -881,6 +920,14 @@ fn finite(s: &str) -> Result<f64, String> {
         Ok(v) if v.is_finite() => Ok(v),
         _ => Err(format!("`{s}` is not a finite number")),
     }
+}
+
+/// A page point written `X,Y`.
+fn point(s: &str) -> Result<(f64, f64), String> {
+    let (x, y) = s
+        .split_once(',')
+        .ok_or_else(|| format!("`{s}` is not a point written X,Y"))?;
+    Ok((finite(x.trim())?, finite(y.trim())?))
 }
 
 /// A finite number above 0.

@@ -72,6 +72,18 @@ pub enum Request {
         #[serde(default)]
         compare: bool,
     },
+    Drag {
+        from: String,
+        to: Option<String>,
+        to_x: Option<f64>,
+        to_y: Option<f64>,
+        /// Page points the path passes through on the way, in CSS pixels.
+        #[serde(default)]
+        via: Vec<(f64, f64)>,
+        steps: u32,
+        #[serde(default)]
+        route: Route,
+    },
     Wheel {
         target: Option<String>,
         x: Option<f64>,
@@ -159,6 +171,7 @@ pub enum CommandKind {
     Type,
     Key,
     Hold,
+    Drag,
     Wheel,
     MeasureStart,
     MeasureStop,
@@ -188,7 +201,8 @@ impl Request {
             Request::Click { route, .. }
             | Request::Type { route, .. }
             | Request::Key { route, .. }
-            | Request::Wheel { route, .. } => *route == Route::Os,
+            | Request::Wheel { route, .. }
+            | Request::Drag { route, .. } => *route == Route::Os,
             Request::Hold { route, compare, .. } => *route == Route::Os || *compare,
             _ => false,
         }
@@ -206,6 +220,7 @@ impl Request {
             Request::Type { .. } => CommandKind::Type,
             Request::Key { .. } => CommandKind::Key,
             Request::Hold { .. } => CommandKind::Hold,
+            Request::Drag { .. } => CommandKind::Drag,
             Request::Wheel { .. } => CommandKind::Wheel,
             Request::MeasureStart { .. } => CommandKind::MeasureStart,
             Request::MeasureStop { .. } => CommandKind::MeasureStop,
@@ -283,6 +298,7 @@ impl CommandKind {
             CommandKind::Type => "type",
             CommandKind::Key => "key",
             CommandKind::Hold => "hold",
+            CommandKind::Drag => "drag",
             CommandKind::Wheel => "wheel",
             CommandKind::MeasureStart => "measure_start",
             CommandKind::MeasureStop => "measure_stop",
@@ -314,6 +330,7 @@ impl CommandKind {
             | CommandKind::Type
             | CommandKind::Key
             | CommandKind::Hold
+            | CommandKind::Drag
             | CommandKind::Wheel
             | CommandKind::Wait
             | CommandKind::Eval
@@ -350,6 +367,7 @@ impl CommandKind {
             | CommandKind::Type
             | CommandKind::Key
             | CommandKind::Hold
+            | CommandKind::Drag
             | CommandKind::Wheel
             | CommandKind::Capture => true,
             CommandKind::Ping
@@ -390,6 +408,7 @@ impl CommandKind {
             | CommandKind::Type
             | CommandKind::Key
             | CommandKind::Hold
+            | CommandKind::Drag
             | CommandKind::Wheel
             | CommandKind::MeasureStart
             | CommandKind::MeasureStop
@@ -460,6 +479,15 @@ mod tests {
                 require_focus: None,
                 route: Route::Os,
                 compare: false,
+            },
+            Request::Drag {
+                from: "#a".into(),
+                to: None,
+                to_x: Some(1.0),
+                to_y: Some(2.0),
+                via: vec![(3.0, 4.0)],
+                steps: 5,
+                route: Route::Os,
             },
             Request::Wheel {
                 target: None,

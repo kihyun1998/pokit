@@ -61,6 +61,12 @@
     <p id="native-result" role="status"></p>
   </section>
 
+  <section id="pane-drag">
+    <h2>Drag</h2>
+    <div id="drag-me" style="width: 120px; height: 40px; background: #cde; touch-action: none; user-select: none">Drag me</div>
+    <p id="drag-result" role="status"></p>
+  </section>
+
   <section id="pane-actions">
     <h2>Actions</h2>
     <button id="show-later" type="button">Show later</button>
@@ -126,6 +132,28 @@
       $('late-slot').appendChild(p);
     });
 
+    // A drag of #drag-me with the pointer captured: dropped in the page it says where, dropped
+    // outside the window it opens a window there.
+    let dragging = null;
+    let moves = 0;
+    $('drag-me').addEventListener('pointerdown', (e) => {
+      dragging = e.pointerId;
+      moves = 0;
+      $('drag-me').setPointerCapture(e.pointerId);
+      $('drag-result').textContent = 'dragging';
+    });
+    $('drag-me').addEventListener('pointermove', (e) => { if (e.pointerId === dragging) moves += 1; });
+    $('drag-me').addEventListener('pointerup', (e) => {
+      if (e.pointerId !== dragging) return;
+      dragging = null;
+      $('drag-result').dataset.moves = moves;
+      if (e.clientX < 0 || e.clientY < 0 || e.clientX >= innerWidth || e.clientY >= innerHeight) {
+        $('drag-result').textContent = `out at ${e.screenX},${e.screenY}`;
+        invoke('open_dropped', { x: e.screenX, y: e.screenY });
+      } else {
+        $('drag-result').textContent = `in at ${Math.round(e.clientX)},${Math.round(e.clientY)}`;
+      }
+    });
     // Every wheel turn over the scroller, with its delta.
     $('scroller').addEventListener('wheel', (e) => window.__events.push([Math.round(performance.now()), 'wheel', 'scroller', String(e.deltaY)]));
 

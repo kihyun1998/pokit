@@ -23,6 +23,23 @@ async fn open_second(app: tauri::AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// Opens a window where something was dropped outside the main one, at (`x`, `y`) in logical
+/// screen pixels, without taking the focus.
+#[tauri::command]
+async fn open_dropped(app: tauri::AppHandle, x: f64, y: f64) -> Result<(), String> {
+    if app.get_webview_window("dropped").is_some() {
+        return Ok(());
+    }
+    WebviewWindowBuilder::new(&app, "dropped", WebviewUrl::App("second.html".into()))
+        .title("pokit fixture - dropped")
+        .position(x, y)
+        .inner_size(320.0, 200.0)
+        .focused(false)
+        .build()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 /// Hides the main window's webview for `ms` milliseconds, as a host does when its window is
 /// minimized (`IsVisible` false), without touching the window itself.
 #[tauri::command]
@@ -176,6 +193,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             backend_log,
             open_second,
+            open_dropped,
             hide_webview_for
         ])
         .run(tauri::generate_context!())

@@ -117,6 +117,23 @@ pub fn us_scan(code: &str) -> Option<(u16, bool)> {
         .map(|(_, s)| (*s, extended))
 }
 
+/// What `release` takes for the left mouse button, beside key codes.
+pub const LEFT_BUTTON: &str = "MouseLeft";
+
+/// The points of a drag along `points`: the first, then `steps` evenly spaced points on each
+/// segment after it, the segment's end last.
+pub fn drag_path(points: &[(f64, f64)], steps: u32) -> Vec<(f64, f64)> {
+    let mut path = points.first().copied().into_iter().collect::<Vec<_>>();
+    for pair in points.windows(2) {
+        let ((x0, y0), (x1, y1)) = (pair[0], pair[1]);
+        for n in 1..=steps.max(1) {
+            let t = f64::from(n) / f64::from(steps.max(1));
+            path.push((x0 + (x1 - x0) * t, y0 + (y1 - y0) * t));
+        }
+    }
+    path
+}
+
 /// The keys of a chord in the order a hand presses them: modifiers down, the key down and up,
 /// modifiers up in reverse. Each entry is (physical key `code`, key up).
 pub fn chord_strokes(code: &str, modifiers: u32) -> Vec<(String, bool)> {
@@ -149,8 +166,8 @@ pub fn to_screen(origin: (i32, i32), css: (f64, f64), ratio: f64) -> (i32, i32) 
 
 #[cfg(windows)]
 pub use win::{
-    activate, click, is_frontmost, key, release, render_widget, strokes, text, top_level_windows,
-    wheel,
+    activate, click, drag, is_frontmost, key, release, render_widget, strokes, text,
+    top_level_windows, wheel,
 };
 
 #[cfg(windows)]
@@ -335,7 +352,13 @@ mod win {
     pub fn release(codes: &[String]) {
         let inputs: Vec<INPUT> = codes
             .iter()
-            .filter_map(|c| physical_key(c, true).ok())
+            .filter_map(|c| {
+                if c == super::LEFT_BUTTON {
+                    Some(mouse(0, 0, MOUSEEVENTF_LEFTUP, 0))
+                } else {
+                    physical_key(c, true).ok()
+                }
+            })
             .collect();
         send(&inputs);
     }
@@ -474,6 +497,56 @@ mod win {
         })
     }
 
+    /// Presses the left button at the first point of `path` (page CSS pixels, in the app's front
+    /// window, which must be the page there), moves along the rest `step` apart, wherever they
+    /// lead on the screen, and releases the button at the last; the last screen point. The
+    /// button is released whatever goes wrong after it was pressed.
+    pub fn drag(
+        pid: u32,
+        path: &[(f64, f64)],
+        ratio: f64,
+        step: std::time::Duration,
+    ) -> Result<(i32, i32), OsError> {
+        let Some((&first, rest)) = path.split_first() else {
+            return Err(OsError::Failed("a drag needs a path".into()));
+        };
+        let start = at_page_point(pid, first, ratio, |at| {
+            vec![
+                mouse(at.0, at.1, MOUSEEVENTF_MOVE, 0),
+                mouse(at.0, at.1, MOUSEEVENTF_LEFTDOWN, 0),
+            ]
+        })?;
+        /// Releases the left button and puts the thread's DPI context back when dropped, so a
+        /// panic mid-drag leaves neither behind.
+        struct Held(windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT);
+        impl Drop for Held {
+            fn drop(&mut self) {
+                send(&[mouse(0, 0, MOUSEEVENTF_LEFTUP, 0)]);
+                // SAFETY: restores the context this thread had.
+                unsafe { SetThreadDpiAwarenessContext(self.0) };
+            }
+        }
+        // SAFETY: switches this thread to physical pixels; `Held` puts the previous one back.
+        let _held = Held(unsafe {
+            SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
+        });
+        let mut at = start;
+        let moved = rest.iter().try_for_each(|&(x, y)| {
+            std::thread::sleep(step);
+            at = (
+                start.0 + ((x - first.0) * ratio).round() as i32,
+                start.1 + ((y - first.1) * ratio).round() as i32,
+            );
+            if send(&[mouse(at.0, at.1, MOUSEEVENTF_MOVE, 0)]) == 1 {
+                Ok(())
+            } else {
+                Err(OsError::Failed("Windows did not take a mouse move".into()))
+            }
+        });
+        std::thread::sleep(step);
+        moved.map(|_| at)
+    }
+
     /// Moves the cursor to a point of the page and turns the wheel `notches` notches, positive
     /// towards the user (scrolling down), as a hand would; the screen point.
     pub fn wheel(
@@ -554,6 +627,21 @@ mod win {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_drag_path_steps_evenly_along_each_part_and_ends_on_each_point() {
+        let path = drag_path(&[(0.0, 0.0), (10.0, 0.0), (10.0, 20.0)], 2);
+        assert_eq!(
+            path,
+            vec![
+                (0.0, 0.0),
+                (5.0, 0.0),
+                (10.0, 0.0),
+                (10.0, 10.0),
+                (10.0, 20.0)
+            ]
+        );
+    }
 
     #[test]
     fn a_chord_is_pressed_modifiers_first_and_released_in_reverse() {
