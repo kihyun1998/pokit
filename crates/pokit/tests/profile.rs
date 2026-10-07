@@ -29,7 +29,7 @@ fn ms(v: &Value) -> f64 {
 
 #[test]
 fn a_trace_of_a_stalling_page_attributes_the_time_to_script() {
-    let p = Pokit::launch_fixture("trace-stall");
+    let p = shared_fixture();
     let r = p.run(&["trace", "start"]);
     assert_eq!(r.code, 0, "{}", r.out);
     stall_ten_keys(&p);
@@ -62,7 +62,7 @@ fn a_trace_of_a_stalling_page_attributes_the_time_to_script() {
 
 #[test]
 fn a_profile_of_a_stalling_page_names_the_stalling_function() {
-    let p = Pokit::launch_fixture("profile-stall");
+    let p = shared_fixture();
     let r = p.run(&["profile", "start"]);
     assert_eq!(r.code, 0, "{}", r.out);
     stall_ten_keys(&p);
@@ -91,7 +91,7 @@ fn a_profile_of_a_stalling_page_names_the_stalling_function() {
 
 #[test]
 fn stop_without_start_and_a_second_start_are_refused() {
-    let p = Pokit::launch_fixture("profile-misuse");
+    let p = shared_fixture();
     for what in ["trace", "profile"] {
         let r = p.run(&[what, "stop"]);
         assert_eq!(r.code, 1, "{what} stop without start: {}", r.out);
@@ -110,7 +110,7 @@ fn stop_without_start_and_a_second_start_are_refused() {
 
 #[test]
 fn a_reload_during_a_trace_or_profile_voids_the_run_and_keeps_the_file() {
-    let p = Pokit::launch_fixture("profile-reload");
+    let p = shared_fixture();
     for what in ["trace", "profile"] {
         assert_eq!(p.run(&[what, "start"]).code, 0);
         let before = p.run(&["eval", "performance.timeOrigin"]).out["value"].clone();

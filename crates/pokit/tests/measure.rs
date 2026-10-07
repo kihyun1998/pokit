@@ -43,7 +43,7 @@ fn held_and_measured(p: &Pokit, stall_ms: u64) -> (Value, Value) {
 
 #[test]
 fn a_stalling_page_is_measured_as_stalling_while_hold_keeps_its_own_pace() {
-    let p = Pokit::launch_fixture("measure-stall");
+    let p = shared_fixture();
     let (hold, m) = held_and_measured(&p, 60);
 
     assert_eq!(hold["acknowledged"], 21, "{hold}");
@@ -90,7 +90,7 @@ fn a_stalling_page_is_measured_as_stalling_while_hold_keeps_its_own_pace() {
 
 #[test]
 fn a_page_that_does_not_stall_has_no_frames_over_50_ms() {
-    let p = Pokit::launch_fixture("measure-calm");
+    let p = shared_fixture();
     let (_, m) = held_and_measured(&p, 0);
     assert_eq!(m["keys"]["handled"], 20, "{m}");
     assert_eq!(m["frames"]["over_threshold"], 0, "{m}");
@@ -100,7 +100,7 @@ fn a_page_that_does_not_stall_has_no_frames_over_50_ms() {
 
 #[test]
 fn input_carries_its_send_time_on_the_page_clock() {
-    let p = Pokit::launch_fixture("measure-clock");
+    let p = shared_fixture();
     let launched = p.launched.as_ref().unwrap();
     let uncertainty = f(&launched["clock"]["uncertainty_ms"]);
     assert!(uncertainty >= 0.0, "{launched}");
@@ -132,7 +132,7 @@ fn input_carries_its_send_time_on_the_page_clock() {
 
 #[test]
 fn unwatched_fields_say_not_requested() {
-    let p = Pokit::launch_fixture("measure-unwatched");
+    let p = shared_fixture();
     assert_eq!(p.run(&["measure", "start"]).code, 0);
     let m = p.run(&["measure", "stop", "--quiet", "200"]);
     assert_eq!(m.code, 0, "{}", m.out);
@@ -147,7 +147,7 @@ fn unwatched_fields_say_not_requested() {
 
 #[test]
 fn a_reload_between_start_and_stop_voids_the_run() {
-    let p = Pokit::launch_fixture("measure-reload");
+    let p = shared_fixture();
     assert_eq!(p.run(&["measure", "start"]).code, 0);
     let before = p.run(&["eval", "performance.timeOrigin"]).out["value"].clone();
     assert_eq!(p.run(&["eval", "location.reload(); true"]).code, 0);
@@ -165,7 +165,7 @@ fn a_reload_between_start_and_stop_voids_the_run() {
 
 #[test]
 fn stop_without_start_and_a_watch_on_nothing_are_refused() {
-    let p = Pokit::launch_fixture("measure-misuse");
+    let p = shared_fixture();
     let r = p.run(&["measure", "stop"]);
     assert_eq!(r.code, 1, "{}", r.out);
     let r = p.run(&["measure", "start", "--watch", "#nothing-like-this"]);
@@ -210,7 +210,7 @@ fn closing_an_attached_session_without_stop_leaves_no_probe() {
 
 #[test]
 fn a_held_chord_counts_its_key_not_its_modifiers() {
-    let p = Pokit::launch_fixture("measure-modifiers");
+    let p = shared_fixture();
     assert_eq!(p.run(&["measure", "start"]).code, 0);
     let r = p.run(&["hold", "Ctrl+KeyB", "--count", "5", "--into", "#stall"]);
     assert_eq!(r.code, 0, "{}", r.out);

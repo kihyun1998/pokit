@@ -48,7 +48,7 @@ fn in_order(seen: &[String], want: &[&str]) -> bool {
 
 #[test]
 fn hangul_is_composed_key_by_key_and_lands_as_typed() {
-    let p = Pokit::launch_fixture("ime-compose");
+    let p = shared_fixture();
     let (value, events) = typed(&p, "한글");
     assert_eq!(value, "한글");
     assert_eq!(of_kind(&events, "compositionstart:").len(), 2, "{events:?}");
@@ -73,7 +73,7 @@ fn hangul_is_composed_key_by_key_and_lands_as_typed() {
 
 #[test]
 fn a_final_consonant_moves_on_as_a_real_ime_moves_it() {
-    let p = Pokit::launch_fixture("ime-move");
+    let p = shared_fixture();
     let (value, events) = typed(&p, "가나");
     assert_eq!(value, "가나");
     assert!(
@@ -94,14 +94,14 @@ fn a_final_consonant_moves_on_as_a_real_ime_moves_it() {
 
 #[test]
 fn text_mixing_hangul_and_ascii_lands_in_order() {
-    let p = Pokit::launch_fixture("ime-mixed");
+    let p = shared_fixture();
     let (value, _) = typed(&p, "a한 b글.");
     assert_eq!(value, "a한 b글.");
 }
 
 #[test]
 fn lone_jamo_land_as_typed_and_do_not_join_their_neighbours() {
-    let p = Pokit::launch_fixture("ime-jamo");
+    let p = shared_fixture();
     for text in ["네ㅋㅋ", "가ㄴ", "한ㅏ", "ㄱㅏ", "ㅗㅏ", "ㄳ", "ㅘ요"] {
         let (value, _) = typed(&p, text);
         assert_eq!(value, text);
