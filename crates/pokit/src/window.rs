@@ -70,6 +70,36 @@ pub fn outer_for_viewport(want: (f64, f64), ratio: f64, placed: Placed, area: Ar
     )
 }
 
+/// A capture of a window with the app's own windows over it: RGBA pixels, row by row, and the
+/// windows drawn, bottom first.
+pub struct Shot {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+    pub windows: Vec<Drawn>,
+}
+
+/// One window drawn into a capture: its title, class, and the part of the capture it covers
+/// (x, y, width, height in the capture's pixels).
+pub struct Drawn {
+    pub title: String,
+    pub class: String,
+    pub rect: (i32, i32, i32, i32),
+}
+
+/// `shot` as a PNG file's bytes.
+pub fn png(shot: &Shot) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    let mut encoder = png::Encoder::new(&mut out, shot.width, shot.height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder
+        .write_header()
+        .and_then(|mut w| w.write_image_data(&shot.rgba))
+        .map_err(|e| format!("could not encode the capture: {e}"))?;
+    Ok(out)
+}
+
 /// Why no window was found for a page.
 #[derive(Debug)]
 pub enum Unplaced {
@@ -79,19 +109,27 @@ pub enum Unplaced {
 }
 
 #[cfg(windows)]
-pub use win::{area, page_window, placed, set};
+pub use win::{area, capture, page_window, placed, set};
 
 #[cfg(windows)]
 mod win {
-    use super::{Area, PageBox, Placed, Unplaced};
+    use super::{Area, Drawn, PageBox, Placed, Shot, Unplaced};
     use windows::Win32::Foundation::{HWND, POINT, RECT};
-    use windows::Win32::Graphics::Gdi::ClientToScreen;
+    use windows::Win32::Graphics::Dwm::{
+        DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS,
+    };
+    use windows::Win32::Graphics::Gdi::{
+        ClientToScreen, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC,
+        GetDIBits, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+        HDC,
+    };
+    use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
     use windows::Win32::UI::HiDpi::{
         GetDpiForWindow, SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetClientRect, GetWindowRect, IsIconic, IsZoomed, SetWindowPos, SWP_NOACTIVATE, SWP_NOMOVE,
-        SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER,
+        GetClassNameW, GetClientRect, GetWindowRect, GetWindowTextW, IsIconic, IsZoomed,
+        SetWindowPos, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER,
     };
 
     /// Runs `f` with this thread in physical pixels, and puts the previous context back.
@@ -180,6 +218,179 @@ mod win {
                 width: logical(r.right - r.left),
                 height: logical(r.bottom - r.top),
                 scale,
+            })
+        })
+    }
+
+    /// What the user sees of a window: its frame without Windows' invisible resize borders.
+    fn frame(hwnd: HWND) -> RECT {
+        let mut r = RECT::default();
+        // SAFETY: `r` is a valid out-pointer of the size passed.
+        let dwm = unsafe {
+            DwmGetWindowAttribute(
+                hwnd,
+                DWMWA_EXTENDED_FRAME_BOUNDS,
+                &mut r as *mut RECT as *mut _,
+                std::mem::size_of::<RECT>() as u32,
+            )
+        };
+        if dwm.is_err() {
+            // SAFETY: a plain query; `r` is a valid out-pointer.
+            let _ = unsafe { GetWindowRect(hwnd, &mut r) };
+        }
+        r
+    }
+
+    /// `PW_RENDERFULLCONTENT`: draw content composed outside the window's own drawing too.
+    const RENDER_FULL_CONTENT: PRINT_WINDOW_FLAGS = PRINT_WINDOW_FLAGS(2);
+
+    /// Whether DWM keeps the window from being seen (on another virtual desktop, for one).
+    fn cloaked(hwnd: HWND) -> bool {
+        let mut cloak = 0u32;
+        // SAFETY: `cloak` is a valid out-pointer of the size passed.
+        let read = unsafe {
+            DwmGetWindowAttribute(
+                hwnd,
+                DWMWA_CLOAKED,
+                &mut cloak as *mut u32 as *mut _,
+                std::mem::size_of::<u32>() as u32,
+            )
+        };
+        read.is_ok() && cloak != 0
+    }
+
+    fn text(hwnd: HWND, class: bool) -> String {
+        let mut buf = [0u16; 256];
+        // SAFETY: `buf` is valid for its length.
+        let n = unsafe {
+            if class {
+                GetClassNameW(hwnd, &mut buf)
+            } else {
+                GetWindowTextW(hwnd, &mut buf)
+            }
+        };
+        String::from_utf16_lossy(&buf[..n.max(0) as usize])
+    }
+
+    /// Window `hwnd` as it draws itself, whatever covers it (`PrintWindow` with
+    /// `PW_RENDERFULLCONTENT`): its window rectangle and BGRA pixels.
+    fn print(screen: HDC, hwnd: HWND) -> Option<(RECT, Vec<u8>)> {
+        let mut r = RECT::default();
+        // SAFETY: a plain query; `r` is a valid out-pointer.
+        unsafe { GetWindowRect(hwnd, &mut r) }.ok()?;
+        let (w, h) = (r.right - r.left, r.bottom - r.top);
+        if w <= 0 || h <= 0 {
+            return None;
+        }
+        // SAFETY: GDI objects are created here, used only here, and deleted before returning.
+        unsafe {
+            let dc = CreateCompatibleDC(Some(screen));
+            let bitmap = CreateCompatibleBitmap(screen, w, h);
+            let old = SelectObject(dc, bitmap.into());
+            let printed = PrintWindow(hwnd, dc, RENDER_FULL_CONTENT).as_bool();
+            let mut info = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: w,
+                    biHeight: -h,
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut bgra = vec![0u8; (w * h * 4) as usize];
+            SelectObject(dc, old);
+            let lines = GetDIBits(
+                dc,
+                bitmap,
+                0,
+                h as u32,
+                Some(bgra.as_mut_ptr().cast()),
+                &mut info,
+                DIB_RGB_COLORS,
+            );
+            let _ = DeleteObject(bitmap.into());
+            let _ = DeleteDC(dc);
+            (printed && lines == h).then_some((r, bgra))
+        }
+    }
+
+    /// The window holding a page, with the app's own windows over it drawn in, each as it draws
+    /// itself: windows of other apps never get in, whether they cover it or not.
+    pub fn capture(pid: u32, hwnd: isize) -> Result<Shot, String> {
+        physical(|| {
+            let main = handle(hwnd);
+            // SAFETY: a plain query on a window handle.
+            if unsafe { IsIconic(main) }.as_bool() {
+                return Err("the window is minimized; restore it first".into());
+            }
+            let canvas = frame(main);
+            let (cw, ch) = (canvas.right - canvas.left, canvas.bottom - canvas.top);
+            if cw <= 0 || ch <= 0 {
+                return Err("the window has no size".into());
+            }
+            let order = crate::os_input::top_level_windows(pid);
+            let at = order
+                .iter()
+                .position(|&h| h == main)
+                .ok_or("the window is no longer one of the app's")?;
+            let mut rgba = vec![0u8; (cw * ch * 4) as usize];
+            let mut windows = Vec::new();
+            // SAFETY: the screen DC is released below.
+            let screen = unsafe { GetDC(None) };
+            for &layer in order[..=at].iter().rev() {
+                // SAFETY: a plain query on a window handle.
+                if unsafe { IsIconic(layer) }.as_bool() || cloaked(layer) {
+                    continue;
+                }
+                let f = frame(layer);
+                let Some((r, bgra)) = print(screen, layer) else {
+                    if layer == main {
+                        // SAFETY: `screen` came from GetDC(None).
+                        unsafe { ReleaseDC(None, screen) };
+                        return Err("Windows could not draw the window".into());
+                    }
+                    continue;
+                };
+                // What shows of this window on the canvas, inside what was drawn of it.
+                let left = f.left.max(canvas.left).max(r.left);
+                let top = f.top.max(canvas.top).max(r.top);
+                let right = f.right.min(canvas.right).min(r.right);
+                let bottom = f.bottom.min(canvas.bottom).min(r.bottom);
+                if right <= left || bottom <= top {
+                    continue;
+                }
+                let (w, span) = (r.right - r.left, (right - left) as usize * 4);
+                for y in top..bottom {
+                    let from = (((y - r.top) * w + (left - r.left)) * 4) as usize;
+                    let to = (((y - canvas.top) * cw + (left - canvas.left)) * 4) as usize;
+                    for (dst, src) in rgba[to..to + span]
+                        .chunks_exact_mut(4)
+                        .zip(bgra[from..from + span].chunks_exact(4))
+                    {
+                        dst.copy_from_slice(&[src[2], src[1], src[0], 255]);
+                    }
+                }
+                windows.push(Drawn {
+                    title: text(layer, false),
+                    class: text(layer, true),
+                    rect: (
+                        left - canvas.left,
+                        top - canvas.top,
+                        right - left,
+                        bottom - top,
+                    ),
+                });
+            }
+            // SAFETY: `screen` came from GetDC(None).
+            unsafe { ReleaseDC(None, screen) };
+            Ok(Shot {
+                width: cw as u32,
+                height: ch as u32,
+                rgba,
+                windows,
             })
         })
     }

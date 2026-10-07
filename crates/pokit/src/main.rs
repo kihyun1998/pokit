@@ -328,11 +328,15 @@ enum Command {
         #[arg(long = "for", default_value_t = 10_000)]
         wait_ms: u64,
     },
-    /// A PNG of the page or of one element.
+    /// A PNG of the page or of one element, or with `--window` of the window holding the page.
     Capture {
         target: Option<String>,
         #[arg(long)]
         out: Option<String>,
+        /// The window holding the page with the app's own menus and dialogs over it, cut to the
+        /// window; other apps' windows and the page's own popups are left out.
+        #[arg(long, conflicts_with = "target")]
+        window: bool,
     },
     /// Console output, uncaught errors and backend output collected by the session.
     Logs {
@@ -646,9 +650,14 @@ fn dispatch(cli: Cli) -> (String, i32, Value) {
             expr,
             timeout_ms: wait_ms,
         },
-        Command::Capture { target, out } => Request::Capture {
+        Command::Capture {
+            target,
+            out,
+            window,
+        } => Request::Capture {
             target,
             out: out.map(|o| absolute(&o)),
+            window,
         },
         Command::Logs { since } => Request::Logs { since },
         Command::Eval { expression, file } => {
@@ -812,6 +821,11 @@ fn capabilities() -> output::Fields {
                     "resize": { "takes_focus": false },
                 } })
             }
+            "capture" if cfg!(windows) => json!({
+                "supported": true,
+                "route": output::ENGINE,
+                "window": { "native_ui": true, "takes_focus": false, "needs": "a launched session" },
+            }),
             name if support::answers(name) => match support::routes(name) {
                 Some(routes) => json!({ "supported": true, "routes": routes }),
                 None => json!({ "supported": true, "route": output::ENGINE }),

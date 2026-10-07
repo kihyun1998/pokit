@@ -337,3 +337,91 @@ fn window_move_and_resize_reshape_the_page_without_taking_the_foreground() {
         f.out
     );
 }
+
+/// The PNG at `path`: its width, height and RGBA pixels.
+fn pixels(path: &str) -> (u32, u32, Vec<u8>) {
+    let decoder = png::Decoder::new(std::fs::File::open(path).unwrap());
+    let mut reader = decoder.read_info().unwrap();
+    let mut buf = vec![0; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf).unwrap();
+    buf.truncate(info.buffer_size());
+    let rgba = match info.color_type {
+        png::ColorType::Rgba => buf,
+        png::ColorType::Rgb => buf
+            .chunks(3)
+            .flat_map(|c| [c[0], c[1], c[2], 255])
+            .collect(),
+        other => panic!("unexpected PNG colour type {other:?}"),
+    };
+    (info.width, info.height, rgba)
+}
+
+/// How many pixels two captures of the same size differ in.
+fn differing(a: &(u32, u32, Vec<u8>), b: &(u32, u32, Vec<u8>)) -> usize {
+    assert_eq!((a.0, a.1), (b.0, b.1), "the captures differ in size");
+    a.2.chunks(4)
+        .zip(b.2.chunks(4))
+        .filter(|(x, y)| x != y)
+        .count()
+}
+
+#[test]
+fn a_window_capture_holds_the_apps_native_ui_and_nothing_of_other_apps() {
+    let p = Pokit::launch_fixture("capture-window");
+    let main = fixture_window(&p);
+    let shot = |name: &str| {
+        let out = p.home.join(name);
+        let r = p.run(&["capture", "--window", "--out", out.to_str().unwrap()]);
+        assert_eq!(r.code, 0, "{}", r.out);
+        (pixels(out.to_str().unwrap()), r.out)
+    };
+
+    let (plain, out) = shot("plain.png");
+    let white = plain
+        .2
+        .chunks(4)
+        .filter(|c| c[..3] == [255, 255, 255])
+        .count();
+    assert!(
+        white > (plain.0 * plain.1 / 3) as usize,
+        "the page is not drawn in the capture ({white} white pixels of {}x{})",
+        plain.0,
+        plain.1
+    );
+    assert_eq!(out["windows"].as_array().map(Vec::len), Some(1), "{out}");
+
+    let cover = Cover::over(window::rect(main), 0);
+    let (covered, _) = shot("covered.png");
+    drop(cover);
+    let changed = differing(&plain, &covered);
+    assert!(
+        changed < (plain.0 * plain.1 / 100) as usize,
+        "another app's window over the fixture got into its capture ({changed} pixels changed)"
+    );
+
+    assert_eq!(p.run(&["native", "choose", "Help > Ask"]).code, 0);
+    assert!(eventually(5000, || p.run(&["native", "list"]).out
+        ["dialogs"]
+        .as_array()
+        .is_some_and(|d| !d.is_empty())));
+    let (with_dialog, out) = shot("dialog.png");
+    let drawn = out["windows"].as_array().unwrap();
+    let dialog = drawn
+        .iter()
+        .find(|w| w["title"] == "pokit fixture question")
+        .unwrap_or_else(|| panic!("the dialog is not among the windows drawn: {out}"));
+    let n = |k: &str| dialog["rect"][k].as_u64().unwrap() as u32;
+    let (x, y, w, h) = (n("x"), n("y"), n("width"), n("height"));
+    assert!(w > 50 && h > 50, "{out}");
+    let changed_in_dialog = (y..y + h)
+        .flat_map(|row| (x..x + w).map(move |col| ((row * plain.0 + col) * 4) as usize))
+        .filter(|&i| plain.2[i..i + 4] != with_dialog.2[i..i + 4])
+        .count();
+    assert!(
+        changed_in_dialog > (w * h / 5) as usize,
+        "the dialog is listed but not drawn where it says ({changed_in_dialog} of {} pixels changed): {out}",
+        w * h
+    );
+    let r = p.run(&["capture", "#submit", "--window"]);
+    assert_eq!(r.code, 2, "an element and --window together: {}", r.out);
+}

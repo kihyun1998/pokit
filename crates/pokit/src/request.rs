@@ -132,6 +132,9 @@ pub enum Request {
     Capture {
         target: Option<String>,
         out: Option<String>,
+        /// The window holding the page, with the app's native UI over it, instead of the page.
+        #[serde(default)]
+        window: bool,
     },
     Logs {
         since: Option<u64>,
@@ -508,6 +511,7 @@ mod tests {
             Request::Capture {
                 target: None,
                 out: None,
+                window: true,
             },
             Request::Logs { since: None },
             Request::Eval {

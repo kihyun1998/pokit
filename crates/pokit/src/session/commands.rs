@@ -228,7 +228,16 @@ impl State {
                 };
                 self.wait_cmd(condition, *timeout_ms).await
             }
-            Request::Capture { target, out } => {
+            #[cfg(windows)]
+            Request::Capture {
+                out, window: true, ..
+            } => self.capture_window_cmd(out.as_deref()).await,
+            #[cfg(not(windows))]
+            Request::Capture { window: true, .. } => Err(Failure::new(
+                Kind::Unsupported,
+                "capturing a window with its native UI is not built on this platform yet",
+            )),
+            Request::Capture { target, out, .. } => {
                 self.capture_cmd(target.as_deref(), out.as_deref()).await
             }
             Request::Logs { since } => {
@@ -749,6 +758,17 @@ impl State {
         }
     }
 
+    /// Where a capture goes: `out`, or the next numbered file in the run record.
+    pub(super) fn capture_path(&self, out: Option<&str>) -> PathBuf {
+        match out {
+            Some(p) => PathBuf::from(p),
+            None => self.record_dir.join(format!(
+                "capture-{}.png",
+                *self.record_seq.lock().unwrap() + 1
+            )),
+        }
+    }
+
     async fn capture_cmd(&self, target: Option<&str>, out: Option<&str>) -> Outcome {
         let mut params = json!({ "format": "png" });
         let cdp = match target {
@@ -762,13 +782,7 @@ impl State {
             }
             None => self.current()?.1,
         };
-        let path = match out {
-            Some(p) => PathBuf::from(p),
-            None => self.record_dir.join(format!(
-                "capture-{}.png",
-                *self.record_seq.lock().unwrap() + 1
-            )),
-        };
+        let path = self.capture_path(out);
         let bytes = screenshot_to(&cdp, params, &path).await?;
         Ok(fields! { "path" => path.display().to_string(), "bytes" => bytes })
     }
