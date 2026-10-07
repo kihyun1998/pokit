@@ -167,6 +167,27 @@ impl State {
         })
     }
 
+    /// Drags through the OS along a page path; the caller has already refused it unless the app
+    /// was in front. The button is held until the end, and released when the session ends.
+    pub(super) async fn os_drag(&self, cdp: &Cdp, path: Vec<(f64, f64)>) -> Outcome {
+        let pid = self.os_pid()?;
+        let ratio = evaluate(cdp, "devicePixelRatio")
+            .await?
+            .as_f64()
+            .unwrap_or(1.0);
+        *self.keys_down.lock().unwrap() = vec![crate::os_input::LEFT_BUTTON.to_string()];
+        let sent = Instant::now();
+        let step = super::commands::DRAG_STEP;
+        let dropped = os(move || crate::os_input::drag(pid, &path, ratio, step)).await;
+        self.keys_down.lock().unwrap().clear();
+        let at = dropped?;
+        let f = fields! {
+            "screen" => serde_json::json!({ "x": at.0, "y": at.1 }),
+            "device_pixel_ratio" => ratio,
+        };
+        Ok(self.stamp(f, &[sent]))
+    }
+
     /// Turns the wheel through the OS over a page point.
     pub(super) async fn os_wheel(&self, cdp: &Cdp, x: f64, y: f64, notches: i32) -> Outcome {
         let pid = self.os_pid()?;

@@ -50,6 +50,9 @@ fn os_input_to_an_app_not_in_front_is_refused_and_sends_nothing() {
         ][..],
         &["wheel", "--notches", "1", "--route", "os"][..],
         &[
+            "drag", "#drag-me", "--to-x", "5", "--to-y", "5", "--route", "os",
+        ][..],
+        &[
             "hold",
             "KeyA",
             "--count",
@@ -402,4 +405,40 @@ fn hold_wheel_and_the_comparison_run_on_both_routes() {
     );
     let m = p.run(&["measure", "stop", "--quiet", "300"]);
     assert_eq!(m.code, 0, "the running measurement was lost: {}", m.out);
+}
+
+/// Holds `FRONT`, because the drag brings its fixture to the front.
+#[test]
+fn a_drag_out_of_the_window_through_the_os_opens_a_window_where_it_was_dropped() {
+    let _front = front();
+    let p = Pokit::launch_fixture("os-drag");
+    assert_eq!(p.run(&["window", "move", "--x", "40", "--y", "40"]).code, 0);
+    assert_eq!(p.run(&["window", "activate"]).code, 0);
+    let width = p.run(&["eval", "innerWidth"]).out["value"]
+        .as_f64()
+        .unwrap();
+    let beyond = format!("{}", width + 150.0);
+    let r = p.run(&[
+        "drag", "#drag-me", "--to-x", &beyond, "--to-y", "100", "--route", "os",
+    ]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert!(
+        eventually(5000, || p.read_text("#drag-result").starts_with("out at")),
+        "the page did not see the drop outside its window: {:?}",
+        p.read_text("#drag-result")
+    );
+    assert!(
+        eventually(5000, || p.run(&["targets"]).out["targets"]
+            .as_array()
+            .is_some_and(|t| t.len() == 2)),
+        "the dropped window is not among the targets: {}",
+        p.run(&["targets"]).out
+    );
+    let pid = p.app_pid();
+    assert!(
+        common::window::windows_of(pid)
+            .into_iter()
+            .any(|h| common::window::title(h) == "pokit fixture - dropped"),
+        "no window opened for the drop"
+    );
 }

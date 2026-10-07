@@ -133,6 +133,22 @@ impl State {
                     self.hold_cmd(hold).await
                 }
             }
+            Request::Drag {
+                from,
+                to,
+                to_x,
+                to_y,
+                via,
+                steps,
+                route,
+            } => {
+                let to = match (to, to_x, to_y) {
+                    (Some(t), _, _) => Some(ClickAt::Element(t)),
+                    (None, Some(x), Some(y)) => Some(ClickAt::Point(*x, *y)),
+                    _ => None,
+                };
+                self.drag_cmd(from, to, via, *steps, *route).await
+            }
             Request::Wheel {
                 target,
                 x,
@@ -785,6 +801,170 @@ impl State {
         let path = self.capture_path(out);
         let bytes = screenshot_to(&cdp, params, &path).await?;
         Ok(fields! { "path" => path.display().to_string(), "bytes" => bytes })
+    }
+}
+
+/// How long a drag waits between pointer moves, about one frame.
+pub(super) const DRAG_STEP: Duration = Duration::from_millis(16);
+
+/// The longest a drag may take, well inside a command's default time limit.
+const DRAG_LONGEST: Duration = Duration::from_secs(10);
+
+/// Scrolls the element into view only if it is not already, and returns its rectangle.
+const SCROLL_INTO_VIEW_IF_NEEDED: &str = "function() {
+    this.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    const r = this.getBoundingClientRect();
+    return { left: r.left, top: r.top, width: r.width, height: r.height }; }";
+
+/// The element's rectangle in the viewport.
+const RECT: &str = "function() { const r = this.getBoundingClientRect();
+    return { left: r.left, top: r.top, width: r.width, height: r.height }; }";
+
+impl State {
+    /// Drags from element `from` to `to` (an element or a page point) through `via`, with the
+    /// left button held: on CDP within the page, through the OS wherever the path leads.
+    async fn drag_cmd(
+        &self,
+        from: &str,
+        to: Option<ClickAt<'_>>,
+        via: &[(f64, f64)],
+        steps: u32,
+        route: Route,
+    ) -> Outcome {
+        let Some(to) = to else {
+            return Err(Failure::new(
+                Kind::Usage,
+                "drag needs --to, or --to-x and --to-y",
+            ));
+        };
+        let moves = u64::from(steps) * (via.len() as u64 + 1);
+        if Duration::from_millis(moves * DRAG_STEP.as_millis() as u64) > DRAG_LONGEST {
+            return Err(Failure::new(
+                Kind::Usage,
+                format!(
+                    "{moves} moves would take over {} s; use fewer --steps or --via points",
+                    DRAG_LONGEST.as_secs()
+                ),
+            ));
+        }
+        #[cfg(windows)]
+        if route == Route::Os {
+            self.refuse_unless_front().await?;
+        }
+        let (tid, cdp, obj) = self.resolve(from).await?;
+        self.ensure_ready(&tid, &cdp).await?;
+        let size = evaluate(&cdp, "[innerWidth, innerHeight]").await?;
+        let (Some(w), Some(h)) = (size[0].as_f64(), size[1].as_f64()) else {
+            return Err(Failure::new(
+                Kind::Error,
+                format!("the page reported no size: {size}"),
+            ));
+        };
+        let inside = |(x, y): (f64, f64)| (0.0..w).contains(&x) && (0.0..h).contains(&y);
+        let center = |r: &Value| {
+            (
+                r["left"].as_f64().unwrap_or(0.0) + r["width"].as_f64().unwrap_or(0.0) / 2.0,
+                r["top"].as_f64().unwrap_or(0.0) + r["height"].as_f64().unwrap_or(0.0) / 2.0,
+            )
+        };
+        let drop_on = match to {
+            ClickAt::Element(t) => {
+                let (to_tid, _, to_obj) = self.resolve(t).await?;
+                if to_tid != tid {
+                    return Err(Failure::new(
+                        Kind::Usage,
+                        format!(
+                            "`{t}` is in another page than `{from}`; drop at a point                              (--to-x, --to-y) with --route os to cross into another window"
+                        ),
+                    ));
+                }
+                Some((t, to_obj))
+            }
+            ClickAt::Point(..) => None,
+        };
+        let start = center(&call_on(&cdp, &obj, SCROLL_INTO_VIEW_IF_NEEDED, &[]).await?);
+        let end = match (drop_on, to) {
+            (Some((t, to_obj)), _) => {
+                let at = center(&call_on(&cdp, &to_obj, RECT, &[]).await?);
+                if !inside(at) {
+                    return Err(Failure::new(
+                        Kind::NotFound,
+                        format!("`{t}` is not in view, so nothing can be dropped on it"),
+                    ));
+                }
+                at
+            }
+            (None, ClickAt::Point(x, y)) => (x, y),
+            (None, ClickAt::Element(t)) => {
+                return Err(Failure::new(Kind::Error, format!("`{t}` was not resolved")))
+            }
+        };
+        let points: Vec<(f64, f64)> = std::iter::once(start)
+            .chain(via.iter().copied())
+            .chain(std::iter::once(end))
+            .collect();
+        let path = crate::os_input::drag_path(&points, steps);
+        let moves = path.len() - 1;
+        let fields = |route: &str| {
+            fields! {
+                "from" => json!({ "x": start.0, "y": start.1 }),
+                "to" => json!({ "x": end.0, "y": end.1 }),
+                "moves" => moves,
+                "route" => route,
+            }
+        };
+        match route {
+            Route::Cdp => {
+                if let Some(&(x, y)) = path.iter().find(|&&p| !inside(p)) {
+                    return Err(Failure::new(
+                        Kind::NotFound,
+                        format!(
+                            "the path leaves the page at ({x}, {y}); only `--route os` can drag \
+                             outside it. Nothing was sent"
+                        ),
+                    ));
+                }
+                let mouse = |kind: &str, (x, y): (f64, f64), buttons: i64| {
+                    json!({ "type": kind, "x": x, "y": y, "button": "left",
+                            "buttons": buttons, "clickCount": 1 })
+                };
+                let sent = vec![Instant::now()];
+                cdp.call("Input.dispatchMouseEvent", mouse("mouseMoved", start, 0))
+                    .await?;
+                let mut at = start;
+                let mut moved = cdp
+                    .call("Input.dispatchMouseEvent", mouse("mousePressed", start, 1))
+                    .await
+                    .map(|_| ());
+                for &p in &path[1..] {
+                    if moved.is_err() {
+                        break;
+                    }
+                    tokio::time::sleep(DRAG_STEP).await;
+                    moved = cdp
+                        .call("Input.dispatchMouseEvent", mouse("mouseMoved", p, 1))
+                        .await
+                        .map(|_| ());
+                    if moved.is_ok() {
+                        at = p;
+                    }
+                }
+                let released = cdp
+                    .call("Input.dispatchMouseEvent", mouse("mouseReleased", at, 0))
+                    .await;
+                moved?;
+                released?;
+                Ok(self.stamp(fields("cdp"), &sent))
+            }
+            #[cfg(windows)]
+            Route::Os => {
+                let mut f = self.os_drag(&cdp, path).await?;
+                f.extend(fields("os"));
+                Ok(f)
+            }
+            #[cfg(not(windows))]
+            Route::Os => Err(os_route_unsupported()),
+        }
     }
 }
 

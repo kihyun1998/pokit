@@ -588,3 +588,70 @@ fn a_chord_on_cdp_presses_its_modifiers_as_keys_like_a_keyboard() {
     );
     assert_eq!(p.run(&["read", "#last-key"]).out["text"], "Ctrl+KeyK");
 }
+
+#[test]
+fn a_drag_on_cdp_moves_the_pointer_within_the_page_and_refuses_to_leave_it() {
+    let p = Pokit::launch_fixture("drag-cdp");
+    let r = p.run(&[
+        "drag", "#drag-me", "--to-x", "300", "--to-y", "200", "--steps", "8",
+    ]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert_eq!(p.read_text("#drag-result"), "in at 300,200");
+    let moves = p.run(&[
+        "eval",
+        "Number(document.querySelector('#drag-result').dataset.moves)",
+    ]);
+    assert!(
+        moves.out["value"].as_u64().unwrap() >= 8,
+        "the pointer did not move along the path: {}",
+        moves.out
+    );
+
+    let width = p.run(&["eval", "innerWidth"]).out["value"]
+        .as_f64()
+        .unwrap();
+    let beyond = format!("{}", width + 150.0);
+    let r = p.run(&["drag", "#drag-me", "--to-x", &beyond, "--to-y", "100"]);
+    assert_eq!(r.code, 5, "a CDP drag left the page: {}", r.out);
+    assert!(
+        r.out["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("--route os"),
+        "{}",
+        r.out
+    );
+    assert_eq!(
+        p.read_text("#drag-result"),
+        "in at 300,200",
+        "a refused drag reached the page"
+    );
+
+    assert_eq!(
+        p.run(&[
+            "eval",
+            "window.scrollTo(0, document.body.scrollHeight); true"
+        ])
+        .code,
+        0
+    );
+    let r = p.run(&["drag", "#drag-me", "--to", "#name"]);
+    assert_eq!(r.code, 5, "a drop on an element out of view: {}", r.out);
+    assert!(
+        r.out["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not in view"),
+        "{}",
+        r.out
+    );
+    assert_eq!(
+        p.run(&["drag", "#drag-me"]).code,
+        2,
+        "a drag with nowhere to go"
+    );
+    let r = p.run(&[
+        "drag", "#drag-me", "--to-x", "1", "--to-y", "1", "--via", "2,2", "--steps", "1000",
+    ]);
+    assert_eq!(r.code, 2, "a drag of over 10 s: {}", r.out);
+}
