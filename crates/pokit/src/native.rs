@@ -1,5 +1,5 @@
-//! An app's native UI on Windows: its menu bars, read and chosen through Win32, and its dialogs,
-//! read and answered through UI Automation.
+//! An app's native UI on Windows: its menu bars and open context menus, read and chosen through
+//! Win32, and its dialogs, read and answered through UI Automation.
 
 #![cfg_attr(not(windows), allow(dead_code))]
 
@@ -17,6 +17,12 @@ pub struct MenuItem {
     pub items: Vec<MenuItem>,
     #[serde(skip)]
     pub id: u32,
+    /// Where the entry sits in its menu, separators counted.
+    #[serde(skip)]
+    pub position: u32,
+    /// The handle of the submenu it opens, 0 for none.
+    #[serde(skip)]
+    pub submenu: isize,
 }
 
 /// A dialog an app has open: its title, its text and its buttons.
@@ -117,7 +123,7 @@ pub enum Refusal {
 }
 
 #[cfg(windows)]
-pub use win::{answer, choose, dialogs, menus};
+pub use win::{answer, choose, context_menu, context_menu_open, dialogs, dismiss, menus};
 
 #[cfg(windows)]
 mod win {
@@ -133,12 +139,13 @@ mod win {
         UIA_TitleBarControlTypeId,
     };
     use windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_ESCAPE, VK_RETURN, VK_RIGHT};
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetClassNameW, GetDlgCtrlID, GetMenu, GetMenuItemCount, GetMenuItemInfoW,
         GetWindowTextW, GetWindowThreadProcessId, IsWindow, IsWindowVisible, PostMessageW,
         SendMessageTimeoutW, HMENU, MENUITEMINFOW, MFS_CHECKED, MFS_DISABLED, MFT_SEPARATOR,
         MIIM_FTYPE, MIIM_ID, MIIM_STATE, MIIM_STRING, MIIM_SUBMENU, SMTO_ABORTIFHUNG, WM_COMMAND,
-        WM_NULL,
+        WM_KEYDOWN, WM_NULL,
     };
 
     /// The visible top-level windows of process `pid`.
@@ -213,6 +220,8 @@ mod win {
                     read_menu(info.hSubMenu)
                 },
                 id: info.wID,
+                position: i,
+                submenu: info.hSubMenu.0 as isize,
             });
         }
         items
@@ -230,9 +239,193 @@ mod win {
             .collect()
     }
 
-    /// Chooses the entry at `path` in the first menu bar of process `pid` that has it, the way
-    /// clicking it would: a `WM_COMMAND` with its id, posted to its window.
+    /// `MN_GETHMENU`: asks a menu window (`#32768`) for the menu it shows.
+    const MN_GETHMENU: u32 = 0x01E1;
+    /// `MN_SELECTITEM`: highlights the entry at a position in a menu window, as the cursor does.
+    const MN_SELECTITEM: u32 = 0x01E5;
+
+    /// Sends `msg` to `hwnd`, giving up after a second if its thread does not answer.
+    fn send(hwnd: HWND, msg: u32, wparam: usize) -> Option<usize> {
+        let mut out = 0usize;
+        // SAFETY: `out` is a valid out-pointer; a dead window makes the call fail.
+        let ok = unsafe {
+            SendMessageTimeoutW(
+                hwnd,
+                msg,
+                WPARAM(wparam),
+                LPARAM(0),
+                SMTO_ABORTIFHUNG,
+                1000,
+                Some(&mut out),
+            )
+        };
+        (ok.0 != 0).then_some(out)
+    }
+
+    fn post_key(hwnd: HWND, key: u16) -> bool {
+        // SAFETY: posts to a menu window of the app; nothing is borrowed.
+        unsafe { PostMessageW(Some(hwnd), WM_KEYDOWN, WPARAM(usize::from(key)), LPARAM(0)) }.is_ok()
+    }
+
+    /// Every submenu handle in `menu`, at any depth.
+    fn submenus(menu: &[MenuItem], out: &mut Vec<isize>) {
+        for item in menu {
+            if item.submenu != 0 {
+                out.push(item.submenu);
+            }
+            submenus(&item.items, out);
+        }
+    }
+
+    /// The open menu windows (`#32768`) of process `pid` that belong to a context menu, with the
+    /// menu each shows, in z-order: a menu bar's dropped-down menu is one of the bar's submenus,
+    /// and is left out.
+    fn menu_windows(pid: u32) -> Vec<(HWND, isize)> {
+        let open: Vec<(HWND, isize)> = windows_of(pid)
+            .into_iter()
+            .filter(|&h| class_name(h) == "#32768")
+            .filter_map(|h| send(h, MN_GETHMENU, 0).map(|m| (h, m as isize)))
+            .filter(|&(_, m)| m != 0)
+            .collect();
+        if open.is_empty() {
+            return open;
+        }
+        let mut of_bars = Vec::new();
+        for (_, bar, _) in menus(pid) {
+            submenus(&bar, &mut of_bars);
+        }
+        open.into_iter()
+            .filter(|(_, m)| !of_bars.contains(m))
+            .collect()
+    }
+
+    /// The menu window of the open context menu's first level: the one whose menu is no other
+    /// open menu's submenu.
+    fn root_menu(pid: u32) -> Option<(HWND, Vec<MenuItem>)> {
+        let open = menu_windows(pid);
+        let trees: Vec<(HWND, isize, Vec<MenuItem>)> = open
+            .iter()
+            .map(|&(h, m)| (h, m, read_menu(HMENU(m as *mut core::ffi::c_void))))
+            .collect();
+        let mut inner = Vec::new();
+        for (_, _, tree) in &trees {
+            submenus(tree, &mut inner);
+        }
+        trees
+            .into_iter()
+            .find(|(_, m, _)| !inner.contains(m))
+            .map(|(h, _, tree)| (h, tree))
+    }
+
+    fn wait_until(mut done: impl FnMut() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while !done() {
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        true
+    }
+
+    /// The context menu process `pid` has open, with its submenus; `None` when none is open.
+    pub fn context_menu(pid: u32) -> Option<Vec<MenuItem>> {
+        root_menu(pid).map(|(_, tree)| tree)
+    }
+
+    /// Chooses the entry at `path` in the open context menu as the keyboard would: each entry on
+    /// the way highlighted (`MN_SELECTITEM`), a submenu opened with Right, the entry taken with
+    /// Enter.
+    fn choose_in_context_menu(pid: u32, path: &[String]) -> Result<String, Refusal> {
+        let (mut window, tree) =
+            root_menu(pid).ok_or_else(|| Refusal::Missing("the context menu closed".into()))?;
+        let item = super::find(&tree, path).ok_or_else(|| {
+            Refusal::Missing(format!(
+                "the open context menu has no `{}`",
+                path.join(" > ")
+            ))
+        })?;
+        if !item.items.is_empty() {
+            return Err(Refusal::Refused(format!(
+                "`{}` opens a submenu; choose an entry in it",
+                path.join(" > ")
+            )));
+        }
+        let mut level = tree.as_slice();
+        for (n, label) in path.iter().enumerate() {
+            let entry = level
+                .iter()
+                .find(|i| &i.label == label)
+                .ok_or_else(|| Refusal::Missing(format!("no `{label}`")))?;
+            if !entry.enabled {
+                return Err(Refusal::Refused(format!(
+                    "`{}` is disabled",
+                    path[..=n].join(" > ")
+                )));
+            }
+            send(window, MN_SELECTITEM, entry.position as usize)
+                .ok_or_else(|| Refusal::Refused("the context menu did not answer".into()))?;
+            if n + 1 == path.len() {
+                if !post_key(window, VK_RETURN.0) {
+                    return Err(Refusal::Refused("could not press Enter in the menu".into()));
+                }
+                break;
+            }
+            let shown = |pid| {
+                menu_windows(pid)
+                    .into_iter()
+                    .find(|&(_, m)| m == entry.submenu)
+                    .map(|(h, _)| h)
+            };
+            let mut opened = shown(pid);
+            if opened.is_none() {
+                post_key(window, VK_RIGHT.0);
+                wait_until(|| {
+                    opened = shown(pid);
+                    opened.is_some()
+                });
+            }
+            window = opened
+                .ok_or_else(|| Refusal::Refused(format!("`{label}` did not open its submenu")))?;
+            level = &entry.items;
+        }
+        if !wait_until(|| menu_windows(pid).is_empty()) {
+            return Err(Refusal::Refused(
+                "the entry was taken, but the context menu is still open".into(),
+            ));
+        }
+        Ok("context menu".into())
+    }
+
+    /// Whether process `pid` has a context menu open.
+    pub fn context_menu_open(pid: u32) -> bool {
+        !menu_windows(pid).is_empty()
+    }
+
+    /// Closes the context menu process `pid` has open, a level at a time with Escape, the
+    /// innermost first; how many menu windows were open.
+    pub fn dismiss(pid: u32) -> Result<usize, Refusal> {
+        let open = menu_windows(pid);
+        if open.is_empty() {
+            return Err(Refusal::Missing("no context menu is open".into()));
+        }
+        for &(hwnd, _) in &open {
+            post_key(hwnd, VK_ESCAPE.0);
+            wait_until(|| menu_windows(pid).iter().all(|&(h, _)| h != hwnd));
+        }
+        if !wait_until(|| menu_windows(pid).is_empty()) {
+            return Err(Refusal::Refused("the context menu is still open".into()));
+        }
+        Ok(open.len())
+    }
+
+    /// Chooses the entry at `path`: in the open context menu when there is one, otherwise in the
+    /// first menu bar of process `pid` that has it, the way clicking it would: a `WM_COMMAND`
+    /// with its id, posted to its window.
     pub fn choose(pid: u32, path: &[String]) -> Result<String, Refusal> {
+        if !menu_windows(pid).is_empty() {
+            return choose_in_context_menu(pid, path);
+        }
         for (title, menu, hwnd) in menus(pid) {
             let Some(item) = super::find(&menu, path) else {
                 continue;
@@ -445,6 +638,8 @@ mod tests {
             checked: false,
             items,
             id: 0,
+            position: 0,
+            submenu: 0,
         }
     }
 

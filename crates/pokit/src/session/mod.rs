@@ -108,6 +108,10 @@ struct State {
     /// How many times the app took the foreground during launch and was made to give it back,
     /// and how many times Windows refused that.
     foreground_given_back: Mutex<(u32, u32)>,
+    /// The window in front, of another app, when the last click was sent: what the app is given
+    /// back to after a context menu that click opened.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    foreground_at_click: Mutex<Option<(isize, u32)>>,
     /// Held by an OS input command while it runs, so two never interleave on the user's keyboard.
     os_input: tokio::sync::Mutex<()>,
     /// The keys `hold --route os` has down right now, released when the session ends.
@@ -225,6 +229,7 @@ async fn serve(mut config: Config) {
         waiters: Mutex::default(),
         clipboard: Mutex::default(),
         foreground_given_back: Mutex::default(),
+        foreground_at_click: Mutex::default(),
         os_input: tokio::sync::Mutex::new(()),
         keys_down: Mutex::default(),
     });

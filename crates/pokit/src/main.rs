@@ -103,10 +103,13 @@ enum WindowAction {
 
 #[derive(Subcommand)]
 enum NativeAction {
-    /// The menu bars of the app's windows and the dialogs it has open.
+    /// The menu bars of the app's windows, the context menu and the dialogs it has open.
     List,
-    /// Choose a menu entry, written as a path: `File > Open`.
+    /// Choose a menu entry, written as a path: `File > Open`; in the open context menu when
+    /// there is one.
     Choose { path: String },
+    /// Close the context menu the app has open without choosing anything.
+    Dismiss,
     /// Press a button in a dialog the app has open.
     Answer {
         button: String,
@@ -652,6 +655,9 @@ fn dispatch(cli: Cli) -> (String, i32, Value) {
         Command::Native {
             action: NativeAction::Answer { button, dialog },
         } => Request::NativeAnswer { button, dialog },
+        Command::Native {
+            action: NativeAction::Dismiss,
+        } => Request::NativeDismiss,
         Command::Clipboard {
             action: ClipboardAction::Read,
         } => Request::ClipboardRead,
@@ -750,9 +756,32 @@ fn send(request: Request, timeout: Duration) -> (String, i32, Value) {
         );
     };
     match client::request(&info, &request, timeout) {
+        #[cfg(windows)]
+        Ok((code, mut out)) => {
+            if let Some(g) = out.as_object_mut().and_then(|o| o.remove("give_back")) {
+                out["foreground_given_back"] = json!(give_back(&g));
+            }
+            (name.to_string(), code, out)
+        }
+        #[cfg(not(windows))]
         Ok((code, out)) => (name.to_string(), code, out),
         Err(e) => outcome_json(name, Err(Failure::new(Kind::NoSession, e))),
     }
+}
+
+/// Gives the foreground back to the window the session names, while the app it names holds it,
+/// for up to a second; whether that window is in front at the end.
+#[cfg(windows)]
+fn give_back(g: &Value) -> bool {
+    let (Some(hwnd), Some(app)) = (g["hwnd"].as_i64(), g["app_pid"].as_u64()) else {
+        return false;
+    };
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while proc::foreground().1 == app as u32 && Instant::now() < deadline {
+        proc::set_foreground(hwnd as isize);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    proc::foreground().0 == hwnd as isize
 }
 
 fn start_session(config: session::Config, timeout: Duration) -> (String, i32, Value) {
@@ -860,6 +889,11 @@ fn capabilities() -> output::Fields {
                     "resize": { "takes_focus": false },
                 } })
             }
+            "native" if cfg!(windows) => json!({
+                "supported": true,
+                "route": output::ENGINE,
+                "takes_focus": "a context menu the app opens holds the foreground while it is open;                                 `native choose` and `native dismiss` give it back",
+            }),
             "capture" if cfg!(windows) => json!({
                 "supported": true,
                 "route": output::ENGINE,

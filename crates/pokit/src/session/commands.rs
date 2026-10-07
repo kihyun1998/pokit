@@ -206,13 +206,16 @@ impl State {
             Request::NativeAnswer { button, dialog } => {
                 self.native_answer_cmd(button, dialog.as_deref()).await
             }
+            #[cfg(windows)]
+            Request::NativeDismiss => self.native_dismiss_cmd().await,
             #[cfg(not(windows))]
-            Request::NativeList | Request::NativeChoose { .. } | Request::NativeAnswer { .. } => {
-                Err(Failure::new(
-                    Kind::Unsupported,
-                    "native UI is not built on this platform yet",
-                ))
-            }
+            Request::NativeList
+            | Request::NativeChoose { .. }
+            | Request::NativeAnswer { .. }
+            | Request::NativeDismiss => Err(Failure::new(
+                Kind::Unsupported,
+                "native UI is not built on this platform yet",
+            )),
             #[cfg(windows)]
             Request::ClipboardRead => self.clipboard_read_cmd().await,
             #[cfg(windows)]
@@ -607,6 +610,13 @@ impl State {
             return self.os_click(&cdp, x, y, &how).await;
             #[cfg(not(windows))]
             return Err(os_route_unsupported());
+        }
+        #[cfg(windows)]
+        if let Some(pid) = self.app_pid {
+            let front = crate::proc::foreground();
+            if front.0 != 0 && front.1 != pid {
+                *self.foreground_at_click.lock().unwrap() = Some(front);
+            }
         }
         let mouse = |kind: &str, button: &str, count: i64| json!({ "type": kind, "x": x, "y": y, "button": button, "clickCount": count });
         let mut sent = vec![Instant::now()];

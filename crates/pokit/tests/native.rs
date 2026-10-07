@@ -6,7 +6,12 @@ mod common;
 
 use common::*;
 use serde_json::Value;
+use std::sync::Mutex;
 use std::time::Duration;
+
+/// Held by the tests that look at the foreground, so that one's fixture does not move it under
+/// another.
+static FOCUS: Mutex<()> = Mutex::new(());
 
 fn native_result(p: &Pokit) -> String {
     p.run(&["read", "#native-result"]).out["text"]
@@ -150,6 +155,7 @@ fn a_dialog_is_read_answered_and_closes_with_the_answer() {
 
 #[test]
 fn a_dialog_the_app_opens_does_not_keep_the_foreground() {
+    let _focus = FOCUS.lock().unwrap_or_else(|e| e.into_inner());
     let before = window::foreground();
     let p = Pokit::launch_fixture("native-focus");
     if !window::can_take_foreground("a_dialog_the_app_opens_does_not_keep_the_foreground") {
@@ -193,4 +199,94 @@ fn an_attached_session_cannot_reach_the_native_ui() {
     guest.launched = Some(r.out);
     let r = guest.run(&["native", "list"]);
     assert_eq!(r.code, 7, "{}", r.out);
+}
+
+/// Right-clicks the fixture's context target and waits for its context menu.
+fn open_context_menu(p: &Pokit) -> Value {
+    let r = p.run(&["click", "#context-target", "--right"]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    let mut menu = Value::Null;
+    assert!(
+        eventually(5000, || {
+            menu = p.run(&["native", "list"]).out["context_menu"].clone();
+            !menu.is_null()
+        }),
+        "no context menu opened"
+    );
+    menu
+}
+
+fn context_menu_closed(p: &Pokit) -> bool {
+    eventually(3000, || {
+        p.run(&["native", "list"]).out["context_menu"].is_null()
+    })
+}
+
+#[test]
+fn a_context_menu_is_read_chosen_in_and_dismissed() {
+    let _focus = FOCUS.lock().unwrap_or_else(|e| e.into_inner());
+    let p = Pokit::launch_fixture("native-context");
+    let before = window::foreground();
+    // Whether the app took the foreground when its menu opened: only then is there anything to
+    // give back.
+    let took = || window::window_pid(window::foreground()) == p.app_pid();
+    let came_back = |took: bool| !took || eventually(2500, || window::foreground() == before);
+    assert!(p.run(&["native", "list"]).out["context_menu"].is_null());
+
+    let menu = open_context_menu(&p);
+    let took_first = took();
+    let labels: Vec<_> = menu
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["label"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(labels, ["Mark here", "Cannot", "More"], "{menu}");
+    assert_eq!(menu[1]["enabled"], false, "{menu}");
+    assert_eq!(menu[2]["items"][0]["label"], "Deeper", "{menu}");
+
+    let r = p.run(&["native", "choose", "More > Deeper"]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert_eq!(r.out["window"], "context menu", "{}", r.out);
+    assert!(
+        context_menu_closed(&p),
+        "choosing left the context menu open"
+    );
+    assert!(
+        came_back(took_first),
+        "choosing in the context menu kept the foreground"
+    );
+    assert!(eventually(3000, || native_result(&p) == "deeper from the context menu"));
+
+    open_context_menu(&p);
+    let took_second = took();
+    let r = p.run(&["native", "choose", "Cannot"]);
+    assert_eq!(r.code, 1, "a disabled entry was chosen: {}", r.out);
+    let r = p.run(&["native", "choose", "File > Say hello"]);
+    assert_eq!(
+        r.code, 5,
+        "with a context menu open, a menu bar path was chosen: {}",
+        r.out
+    );
+    let r = p.run(&["native", "dismiss"]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert!(
+        context_menu_closed(&p),
+        "dismiss left the context menu open"
+    );
+    assert!(
+        came_back(took_second),
+        "dismissing the context menu kept the foreground"
+    );
+    eprintln!(
+        "the app took the foreground at the first menu: {took_first}, the second: {took_second}"
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(native_result(&p), "deeper from the context menu");
+
+    open_context_menu(&p);
+    assert_eq!(p.run(&["native", "choose", "Mark here"]).code, 0);
+    assert!(eventually(3000, || native_result(&p) == "marked from the context menu"));
+    let r = p.run(&["native", "dismiss"]);
+    assert_eq!(r.code, 5, "dismiss with no context menu open: {}", r.out);
 }

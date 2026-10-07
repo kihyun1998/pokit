@@ -64,6 +64,7 @@ pub(super) async fn keep_foreground(
     if before.0 == 0 || before.1 == app_pid {
         return (0, 0);
     }
+    let mut last_refused = false;
     while still() {
         if crate::proc::foreground().1 == app_pid {
             let ok = crate::proc::set_foreground(before.0);
@@ -71,6 +72,12 @@ pub(super) async fn keep_foreground(
                 gave_back += 1;
             } else {
                 refused += 1;
+            }
+            let repeat = !ok && last_refused;
+            last_refused = !ok;
+            if repeat {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                continue;
             }
             state.log(
                 "session",
