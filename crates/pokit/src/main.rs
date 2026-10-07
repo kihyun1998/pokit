@@ -110,6 +110,14 @@ enum NativeAction {
     Choose { path: String },
     /// Close the context menu the app has open without choosing anything.
     Dismiss,
+    /// Pick a file in the file dialog the app has open, as typing its path and pressing the
+    /// default button would.
+    Pick {
+        path: String,
+        /// The dialog's title, when the app has more than one file dialog open.
+        #[arg(long)]
+        dialog: Option<String>,
+    },
     /// Click the app's tray icon (Tauri's tray), as the mouse on it would. A menu it opens, on a
     /// right click or, as Tauri does by default, a left one, is reached by `list` and `choose` as
     /// the context menu, at the user's cursor.
@@ -671,6 +679,12 @@ fn dispatch(cli: Cli) -> (String, i32, Value) {
             action: NativeAction::Dismiss,
         } => Request::NativeDismiss,
         Command::Native {
+            action: NativeAction::Pick { path, dialog },
+        } => Request::NativePick {
+            path: absolute(&path),
+            dialog,
+        },
+        Command::Native {
             action:
                 NativeAction::Tray {
                     index,
@@ -916,7 +930,7 @@ fn capabilities() -> output::Fields {
             "native" if cfg!(windows) => json!({
                 "supported": true,
                 "route": output::ENGINE,
-                "takes_focus": "a context or tray menu the app opens holds the foreground while it is                                 open; `native choose` and `native dismiss` give it back",
+                "takes_focus": "a context or tray menu or a file dialog the app opens holds the foreground while it is open; `native choose`, `native dismiss` and `native pick` give it back",
                 "tray": "icons made with tray-icon (Tauri's tray) only",
             }),
             "capture" if cfg!(windows) => json!({

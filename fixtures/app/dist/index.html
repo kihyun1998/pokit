@@ -59,6 +59,7 @@
   <section id="pane-native">
     <h2>Native</h2>
     <p id="native-result" role="status"></p>
+    <button id="pick-file" type="button">Pick a file</button>
     <div id="context-target" style="padding: 8px; border: 1px dashed #999">Right-click me</div>
   </section>
 
@@ -155,6 +156,7 @@
         $('drag-result').textContent = `in at ${Math.round(e.clientX)},${Math.round(e.clientY)}`;
       }
     });
+    $('pick-file').addEventListener('click', () => invoke('pick_file'));
     // A right-click on #context-target pops up the app's native context menu instead of the
     // webview's own.
     $('context-target').addEventListener('contextmenu', (e) => {

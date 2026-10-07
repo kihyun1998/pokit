@@ -71,6 +71,24 @@ fn tray(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Opens the system's file dialog to pick one file, and shows the path picked, or that none was,
+/// on the page.
+#[tauri::command]
+fn pick_file(app: tauri::AppHandle) {
+    use tauri_plugin_dialog::DialogExt;
+    let handle = app.clone();
+    app.dialog()
+        .file()
+        .set_title("pokit fixture file")
+        .pick_file(move |picked| {
+            let text = match picked {
+                Some(path) => format!("picked {path}"),
+                None => "picked nothing".to_string(),
+            };
+            show_native_result(&handle, &text);
+        });
+}
+
 /// Pops up the page's context menu at the cursor: Mark here, a disabled entry, and a submenu
 /// with Deeper.
 #[tauri::command]
@@ -213,7 +231,7 @@ fn log_accelerator_keys(window: &tauri::WebviewWindow) {
 
 fn main() {
     println!("fixture-backend: started");
-    let builder = tauri::Builder::default();
+    let builder = tauri::Builder::default().plugin(tauri_plugin_dialog::init());
     #[cfg(feature = "pokit")]
     let builder = builder.plugin(tauri_plugin_pokit::init());
     #[cfg(all(feature = "pokit", target_os = "macos"))]
@@ -252,6 +270,7 @@ fn main() {
             open_second,
             open_dropped,
             show_context_menu,
+            pick_file,
             hide_webview_for
         ])
         .run(tauri::generate_context!())

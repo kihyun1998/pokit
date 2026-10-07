@@ -24,6 +24,7 @@ impl State {
 
     pub(super) async fn window_activate_cmd(&self) -> Outcome {
         let pid = self.native_pid()?;
+        *self.foreground_at_click.lock().unwrap() = None;
         let previous = crate::proc::foreground().1;
         match blocking(move || crate::os_input::activate(pid)).await? {
             Some(how) => Ok(fields! {
@@ -67,7 +68,8 @@ impl State {
             crate::native::render(menu, 1, &mut text);
         }
         for d in &dialogs {
-            text.push_str(&format!("dialog \"{}\":\n", d.title));
+            let kind = if d.file { "file dialog" } else { "dialog" };
+            text.push_str(&format!("{kind} \"{}\":\n", d.title));
             for line in &d.text {
                 text.push_str(&format!("  text \"{line}\"\n"));
             }
@@ -160,6 +162,36 @@ impl State {
             if let Some(g) = self.give_back_field(pid, before) {
                 f.insert("give_back".into(), g);
             }
+        }
+        Ok(f)
+    }
+
+    /// `native pick`: picks a file in the app's file dialog, and gives the foreground back to the
+    /// window in front at the click that opened it.
+    pub(super) async fn native_pick_cmd(
+        self: &Arc<Self>,
+        path: &str,
+        dialog: Option<&str>,
+    ) -> Outcome {
+        let pid = self.native_pid()?;
+        let before = self.foreground_before_menu(pid);
+        let (path, dialog) = (path.to_string(), dialog.map(str::to_string));
+        let shown = path.clone();
+        let picked =
+            tokio::task::spawn_blocking(move || crate::native::pick(pid, &path, dialog.as_deref()))
+                .await
+                .map_err(|e| {
+                    Failure::new(Kind::Error, format!("the native UI call failed: {e}"))
+                })?;
+        let dialog = picked.map_err(|e| match e {
+            crate::native::Refusal::Missing(m) => Failure::new(Kind::NotFound, m),
+            crate::native::Refusal::Refused(m) => Failure::new(Kind::Error, m),
+        })?;
+        *self.foreground_at_click.lock().unwrap() = None;
+        self.keep_foreground_after(pid, before, "after a file was picked");
+        let mut f = fields! { "dialog" => dialog, "picked" => shown };
+        if let Some(g) = self.give_back_field(pid, before) {
+            f.insert("give_back".into(), g);
         }
         Ok(f)
     }
