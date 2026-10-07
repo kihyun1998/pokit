@@ -2415,6 +2415,7 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "futures-util",
+ "getrandom 0.2.17",
  "png 0.17.16",
  "serde",
  "serde_json",
