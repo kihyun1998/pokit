@@ -567,3 +567,24 @@ fn a_chord_can_be_sent_into_an_element() {
     assert_eq!(r.code, 0, "{}", r.out);
     assert_eq!(p.run(&["read", "#name"]).out["value"], "A");
 }
+
+#[test]
+fn a_chord_on_cdp_presses_its_modifiers_as_keys_like_a_keyboard() {
+    let p = Pokit::launch_fixture("cdp-modifiers");
+    assert_eq!(p.run(&["eval", "window.__events.length = 0"]).code, 0);
+    let r = p.run(&["key", "Ctrl+KeyK", "--into", "#name"]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    let keys = p
+        .run(&[
+            "eval",
+            "window.__events.filter(e => e[1].startsWith('key')).map(e => e[1] + ':' + e[3])",
+        ])
+        .out["value"]
+        .clone();
+    assert_eq!(
+        keys,
+        serde_json::json!(["keydown:Control", "keydown:k", "keyup:k", "keyup:Control"]),
+        "measured from a real keyboard on 2026-10-07"
+    );
+    assert_eq!(p.run(&["read", "#last-key"]).out["text"], "Ctrl+KeyK");
+}

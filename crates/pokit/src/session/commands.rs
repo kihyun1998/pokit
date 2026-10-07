@@ -28,6 +28,11 @@ impl State {
                 secrets.push(text.to_string());
             }
         }
+        let _one_at_a_time = if request.sends_os_input() {
+            Some(self.os_input.lock().await)
+        } else {
+            None
+        };
         let outcome = match &request {
             Request::Ping => Ok(Fields::new()),
             Request::Status => Ok(self.status()),
@@ -111,15 +116,32 @@ impl State {
                 interval_ms,
                 into,
                 require_focus,
+                route,
+                compare,
             } => {
-                self.hold_cmd(
+                let hold = super::measure::Hold {
                     chord,
-                    *count,
-                    *interval_ms,
-                    into.as_deref(),
-                    require_focus.as_deref(),
-                )
-                .await
+                    count: *count,
+                    interval_ms: *interval_ms,
+                    into: into.as_deref(),
+                    require_focus: require_focus.as_deref(),
+                    route: *route,
+                };
+                if *compare {
+                    self.hold_compare_cmd(hold).await
+                } else {
+                    self.hold_cmd(hold).await
+                }
+            }
+            Request::Wheel {
+                target,
+                x,
+                y,
+                notches,
+                route,
+            } => {
+                self.wheel_cmd(target.as_deref(), *x, *y, *notches, *route)
+                    .await
             }
             Request::MeasureStart {
                 watch,
@@ -734,6 +756,99 @@ impl State {
     }
 }
 
+/// How far CDP turns the wheel for one notch, in CSS pixels; what the OS route scrolls a page
+/// for one notch at 100% (docs/map/sending-os-input.md).
+const PIXELS_PER_NOTCH: f64 = 100.0;
+
+impl State {
+    /// Turns the mouse wheel over an element, a point, or the middle of the page, without
+    /// scrolling anything into view first.
+    pub(super) async fn wheel_cmd(
+        &self,
+        target: Option<&str>,
+        x: Option<f64>,
+        y: Option<f64>,
+        notches: i32,
+        route: Route,
+    ) -> Outcome {
+        #[cfg(windows)]
+        if route == Route::Os {
+            self.refuse_unless_front().await?;
+        }
+        let (cdp, x, y) = match (target, x, y) {
+            (Some(t), _, _) => {
+                let (tid, cdp, obj) = self.resolve(t).await?;
+                self.ensure_ready(&tid, &cdp).await?;
+                let r = call_on(
+                    &cdp,
+                    &obj,
+                    "function() { const r = this.getBoundingClientRect();
+                        const left = Math.max(r.left, 0), right = Math.min(r.right, innerWidth);
+                        const top = Math.max(r.top, 0), bottom = Math.min(r.bottom, innerHeight);
+                        return { x: (left + right) / 2, y: (top + bottom) / 2,
+                                 inside: right > left && bottom > top }; }",
+                    &[],
+                )
+                .await?;
+                if r["inside"] != true {
+                    return Err(Failure::new(
+                        Kind::NotFound,
+                        format!("`{t}` is not in view; the wheel turns where the cursor is"),
+                    ));
+                }
+                (
+                    cdp,
+                    r["x"].as_f64().unwrap_or(0.0),
+                    r["y"].as_f64().unwrap_or(0.0),
+                )
+            }
+            (None, Some(x), Some(y)) => {
+                let (tid, cdp) = self.current()?;
+                self.ensure_ready(&tid, &cdp).await?;
+                let size = evaluate(&cdp, "[innerWidth, innerHeight]").await?;
+                let (w, h) = (
+                    size[0].as_f64().unwrap_or(0.0),
+                    size[1].as_f64().unwrap_or(0.0),
+                );
+                if !(0.0..w).contains(&x) || !(0.0..h).contains(&y) {
+                    return Err(Failure::new(
+                        Kind::NotFound,
+                        format!("({x}, {y}) is outside the page's {w}x{h} viewport"),
+                    ));
+                }
+                (cdp, x, y)
+            }
+            _ => {
+                let (tid, cdp) = self.current()?;
+                self.ensure_ready(&tid, &cdp).await?;
+                let v = evaluate(&cdp, "({ x: innerWidth / 2, y: innerHeight / 2 })").await?;
+                (
+                    cdp,
+                    v["x"].as_f64().unwrap_or(0.0),
+                    v["y"].as_f64().unwrap_or(0.0),
+                )
+            }
+        };
+        match route {
+            Route::Cdp => {
+                let sent = Instant::now();
+                cdp.call(
+                    "Input.dispatchMouseEvent",
+                    json!({ "type": "mouseWheel", "x": x, "y": y, "deltaX": 0,
+                            "deltaY": f64::from(notches) * PIXELS_PER_NOTCH }),
+                )
+                .await?;
+                let f = fields! { "notches" => notches, "x" => x, "y" => y, "route" => "cdp" };
+                Ok(self.stamp(f, &[sent]))
+            }
+            #[cfg(windows)]
+            Route::Os => self.os_wheel(&cdp, x, y, notches).await,
+            #[cfg(not(windows))]
+            Route::Os => Err(os_route_unsupported()),
+        }
+    }
+}
+
 /// Where a click lands: an element (a ref or selector), or a point in the page.
 enum ClickAt<'a> {
     Element(&'a str),
@@ -812,13 +927,18 @@ fn os_route_unsupported() -> Failure {
     )
 }
 
-/// Presses and releases `p`, noting when each event was sent.
+/// Presses and releases `p` as a keyboard would, its modifiers as keys of their own around it,
+/// noting when each event was sent.
 async fn send_key(cdp: &Cdp, p: &KeyPress, sent: &mut Vec<Instant>) -> Result<(), Failure> {
-    sent.push(Instant::now());
-    cdp.call("Input.dispatchKeyEvent", p.down_event(false))
-        .await?;
-    sent.push(Instant::now());
-    cdp.call("Input.dispatchKeyEvent", p.up_event()).await?;
+    let (downs, ups) = p.modifier_events();
+    let events = downs
+        .into_iter()
+        .chain([p.down_event(false), p.up_event()])
+        .chain(ups);
+    for event in events {
+        sent.push(Instant::now());
+        cdp.call("Input.dispatchKeyEvent", event).await?;
+    }
     Ok(())
 }
 

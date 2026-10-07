@@ -49,6 +49,13 @@
     <input id="ime" type="text">
   </section>
 
+  <section id="pane-scroll">
+    <h2>Scroll</h2>
+    <div id="scroller" style="height: 150px; overflow: auto; border: 1px solid #ccc">
+      <div style="height: 3000px">Scroll me</div>
+    </div>
+  </section>
+
   <section id="pane-native">
     <h2>Native</h2>
     <p id="native-result" role="status"></p>
@@ -118,6 +125,9 @@
       p.textContent = 'Here';
       $('late-slot').appendChild(p);
     });
+
+    // Every wheel turn over the scroller, with its delta.
+    $('scroller').addEventListener('wheel', (e) => window.__events.push([Math.round(performance.now()), 'wheel', 'scroller', String(e.deltaY)]));
 
     // Every keydown in the stall field blocks the page for `window.__stallMs` (0 until a test sets it),
     // then bumps the key count's `data-count` once.

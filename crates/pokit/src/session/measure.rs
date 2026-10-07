@@ -8,9 +8,20 @@ use crate::clock::{self, Clock, Sample};
 use crate::fields;
 use crate::measure::{self, Thresholds, Watch};
 use crate::output::{Failure, Fields, Kind, Outcome};
-use crate::request::HOLD_ACK_WAIT;
+use crate::request::{Route, HOLD_ACK_WAIT};
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
+
+/// What `hold` was asked to do.
+#[derive(Clone, Copy)]
+pub(super) struct Hold<'a> {
+    pub(super) chord: &'a str,
+    pub(super) count: u32,
+    pub(super) interval_ms: u64,
+    pub(super) into: Option<&'a str>,
+    pub(super) require_focus: Option<&'a str>,
+    pub(super) route: Route,
+}
 
 /// A measurement between `measure start` and `measure stop`.
 #[derive(Clone)]
@@ -21,6 +32,8 @@ pub(super) struct Measuring {
     origin: f64,
     long_frame_ms: f64,
     over_ms: f64,
+    /// Page-clock times (epoch ms) of the key-downs `hold` sent during the measurement.
+    key_downs: Vec<f64>,
 }
 
 /// How long removing probes may take when the session is ending.
@@ -75,35 +88,91 @@ impl State {
         f
     }
 
-    /// Sends `count` key-downs `interval_ms` apart without waiting for the page, then one key-up.
-    pub(super) async fn hold_cmd(
-        &self,
-        chord: &str,
-        count: u32,
-        interval_ms: u64,
-        into: Option<&str>,
-        require_focus: Option<&str>,
-    ) -> Outcome {
-        let press = chord::parse_chord(chord).map_err(|e| Failure::new(Kind::Error, e))?;
-        if count == 0 {
+    /// Sends `count` key-downs `interval_ms` apart without waiting for the page, then one key-up,
+    /// on CDP or through the OS. Key-downs sent during a measurement are kept for its latency.
+    pub(super) async fn hold_cmd(&self, hold: Hold<'_>) -> Outcome {
+        let press = chord::parse_chord(hold.chord).map_err(|e| Failure::new(Kind::Error, e))?;
+        if hold.count == 0 {
             return Err(Failure::new(
                 Kind::Error,
                 "hold needs --count of at least 1",
             ));
         }
-        let cdp = self.focus_for_input(into, require_focus).await?;
-        let interval = Duration::from_millis(interval_ms);
-        let start = tokio::time::Instant::now();
+        let interval = Duration::from_millis(hold.interval_ms);
+        let (sent, acknowledged) = match hold.route {
+            Route::Cdp => {
+                let cdp = self.focus_for_input(hold.into, hold.require_focus).await?;
+                self.cdp_hold(&cdp, &press, hold.count, interval).await?
+            }
+            #[cfg(windows)]
+            Route::Os => {
+                let pid = self.refuse_unless_front().await?;
+                self.focus_for_input(hold.into, hold.require_focus).await?;
+                let sent = self.os_hold(pid, &press, hold.count, interval).await?;
+                let downs = sent.len().saturating_sub(1);
+                (sent, downs)
+            }
+            #[cfg(not(windows))]
+            Route::Os => {
+                return Err(Failure::new(
+                    Kind::Unsupported,
+                    "OS input is not built on this platform yet",
+                ))
+            }
+        };
+        let (target, _) = self.current()?;
+        self.note_key_downs(&target, &sent[..hold.count as usize]);
+        let f = fields! {
+            "key" => press.key,
+            "code" => press.code,
+            "modifiers" => press.modifiers,
+            "count" => hold.count,
+            "interval_ms" => hold.interval_ms,
+            "acknowledged" => acknowledged,
+            "route" => match hold.route { Route::Cdp => "cdp", Route::Os => "os" },
+        };
+        Ok(self.stamp(f, &sent))
+    }
+
+    /// The CDP side of `hold`: the modifiers down, every key-down and the key-up on schedule, the
+    /// modifiers up, the replies awaited only after the last; when each key-down and the key-up
+    /// were sent, and how many of the chord's key events the page acknowledged.
+    async fn cdp_hold(
+        &self,
+        cdp: &Cdp,
+        press: &chord::KeyPress,
+        count: u32,
+        interval: Duration,
+    ) -> Result<(Vec<Instant>, usize), Failure> {
+        let (modifier_downs, modifier_ups) = press.modifier_events();
         let mut sent = Vec::with_capacity(count as usize + 1);
-        let mut replies: Vec<Reply> = Vec::with_capacity(count as usize + 1);
-        for n in 0..=count {
-            tokio::time::sleep_until(start + interval * n).await;
-            let event = if n < count {
-                press.down_event(n > 0)
-            } else {
-                press.up_event()
-            };
-            sent.push(Instant::now());
+        let mut replies: Vec<Reply> = Vec::new();
+        let pressed = async {
+            for event in modifier_downs {
+                replies.push(cdp.send("Input.dispatchKeyEvent", event)?);
+            }
+            let start = tokio::time::Instant::now();
+            for n in 0..=count {
+                tokio::time::sleep_until(start + interval * n).await;
+                let event = if n < count {
+                    press.down_event(n > 0)
+                } else {
+                    press.up_event()
+                };
+                sent.push(Instant::now());
+                replies.push(cdp.send("Input.dispatchKeyEvent", event)?);
+            }
+            Ok::<_, Failure>(())
+        }
+        .await;
+        if let Err(f) = pressed {
+            let _ = cdp.send("Input.dispatchKeyEvent", press.up_event());
+            for event in modifier_ups {
+                let _ = cdp.send("Input.dispatchKeyEvent", event);
+            }
+            return Err(f);
+        }
+        for event in modifier_ups {
             replies.push(cdp.send("Input.dispatchKeyEvent", event)?);
         }
         let deadline = Instant::now() + HOLD_ACK_WAIT;
@@ -114,15 +183,79 @@ impl State {
                 .await?;
             acknowledged += 1;
         }
-        let f = fields! {
-            "key" => press.key,
-            "code" => press.code,
-            "modifiers" => press.modifiers,
-            "count" => count,
-            "interval_ms" => interval_ms,
-            "acknowledged" => acknowledged,
+        Ok((sent, acknowledged))
+    }
+
+    /// Keeps the page-clock times of key-downs sent to `target` while a measurement runs there,
+    /// for its latency.
+    fn note_key_downs(&self, target: &str, sent: &[Instant]) {
+        let Some(c) = self.clock.lock().unwrap().as_ref().map(|(_, c)| *c) else {
+            return;
         };
-        Ok(self.stamp(f, &sent))
+        if let Some(m) = self.measuring.lock().unwrap().as_mut() {
+            if m.target != target {
+                return;
+            }
+            m.key_downs
+                .extend(sent.iter().map(|i| c.page_time(clock::local_ms(*i))));
+        }
+    }
+
+    /// `hold --compare`: the same keys on CDP and then through the OS, each inside its own
+    /// measurement, and how much longer the OS route took from send to handling.
+    pub(super) async fn hold_compare_cmd(&self, hold: Hold<'_>) -> Outcome {
+        if self.measuring.lock().unwrap().is_some() {
+            return Err(Failure::new(
+                Kind::GuardRefused,
+                "a measurement is running, and --compare takes its own; run `measure stop` first",
+            ));
+        }
+        if cfg!(not(windows)) {
+            return Err(Failure::new(
+                Kind::Unsupported,
+                "OS input is not built on this platform yet",
+            ));
+        }
+        #[cfg(windows)]
+        self.refuse_unless_front().await?;
+        let mut runs = serde_json::Map::new();
+        for route in [Route::Cdp, Route::Os] {
+            self.measure_start_cmd(
+                None,
+                None,
+                Thresholds::default().long_frame_ms,
+                Thresholds::default().over_ms,
+            )
+            .await?;
+            let held = self.hold_cmd(Hold { route, ..hold }).await;
+            let stopped = self
+                .measure_stop_cmd(300, crate::request::COMPARE_SETTLE.as_millis() as u64)
+                .await;
+            held?;
+            let m = stopped?;
+            let name = match route {
+                Route::Cdp => "cdp",
+                Route::Os => "os",
+            };
+            runs.insert(
+                name.into(),
+                json!({ "latency": m["latency"], "keys": m["keys"], "frames": m["frames"] }),
+            );
+        }
+        let diff = |p: &str| match (
+            runs["os"]["latency"][p].as_f64(),
+            runs["cdp"]["latency"][p].as_f64(),
+        ) {
+            (Some(os), Some(cdp)) => json!((((os - cdp) * 10.0).round() / 10.0) + 0.0),
+            _ => json!("a route paired no keys"),
+        };
+        let difference = json!({ "p50_ms": diff("p50_ms"), "p95_ms": diff("p95_ms") });
+        let mut f = Fields::new();
+        f.insert("cdp".into(), runs["cdp"].clone());
+        f.insert("os".into(), runs["os"].clone());
+        f.insert("os_minus_cdp".into(), difference);
+        f.insert("clock".into(), self.clock_json());
+        Ok(f)
     }
 
     pub(super) async fn measure_start_cmd(
@@ -158,6 +291,7 @@ impl State {
             origin: 0.0,
             long_frame_ms,
             over_ms,
+            key_downs: Vec::new(),
         });
         let installed = evaluate(&cdp, &measure::install_script(&id, &t, watch.as_ref())).await;
         let origin = match installed {
@@ -230,6 +364,16 @@ impl State {
         f.insert("settled".into(), json!(settled));
         f.insert("settle_wait_ms".into(), json!(waited));
         f.insert("target".into(), json!(m.target));
+        let uncertainty = self
+            .clock
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map_or(0.0, |(_, c)| clock::round3(c.uncertainty_ms));
+        f.insert(
+            "latency".into(),
+            measure::latency(&raw, &m.key_downs, uncertainty),
+        );
         f.insert("clock".into(), self.clock_json());
         Ok(f)
     }
