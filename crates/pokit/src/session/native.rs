@@ -248,4 +248,48 @@ impl State {
             "device_pixel_ratio" => page.ratio,
         })
     }
+
+    /// `capture --window`: the window holding the current page with the app's own windows over
+    /// it, as a PNG.
+    pub(super) async fn capture_window_cmd(&self, out: Option<&str>) -> Outcome {
+        let pid = self.app_pid.ok_or_else(|| {
+            Failure::new(
+                Kind::Unsupported,
+                "capture --window needs the app's process, which only a launched session knows",
+            )
+        })?;
+        let (tid, cdp) = self.current()?;
+        self.ensure_ready(&tid, &cdp).await?;
+        let page = self.page_box(&cdp).await?;
+        let hwnd = self.page_window(pid, page).await?;
+        let path = self.capture_path(out);
+        let (shot, png) = blocking(move || {
+            let shot = crate::window::capture(pid, hwnd)?;
+            let png = crate::window::png(&shot)?;
+            Ok((shot, png))
+        })
+        .await?;
+        std::fs::write(&path, &png).map_err(|e| {
+            Failure::new(
+                Kind::Error,
+                format!("could not write {}: {e}", path.display()),
+            )
+        })?;
+        let windows: Vec<_> = shot
+            .windows
+            .iter()
+            .map(|d| {
+                let (x, y, width, height) = d.rect;
+                json!({ "title": d.title, "class": d.class,
+                        "rect": { "x": x, "y": y, "width": width, "height": height } })
+            })
+            .collect();
+        Ok(fields! {
+            "path" => path.display().to_string(),
+            "bytes" => png.len(),
+            "width" => shot.width,
+            "height" => shot.height,
+            "windows" => windows,
+        })
+    }
 }

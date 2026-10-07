@@ -11,6 +11,7 @@ brings hand-written notes into its format.
 - [Reaching an app's native UI](reaching-native-ui.md)
 - [Sending OS input](sending-os-input.md)
 - [Placing the app's windows](placing-windows.md)
+- [Capturing a window with its native UI](capturing-a-window.md)
 - [Sending input on macOS](sending-input-on-macos.md)
 - [Seeing the page on macOS](seeing-the-page-on-macos.md)
 - [Reaching the page through the plugin](reaching-the-page-through-the-plugin.md)
