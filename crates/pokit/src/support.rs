@@ -27,6 +27,23 @@ pub fn session_answers(kind_name: &str) -> bool {
     matches!(kind_name, "ping" | "status") || answers(command_of(kind_name))
 }
 
+/// How input reaches the page for `command` (a command-line name), route by route, and whether
+/// each route takes the user's focus (#1, story 42); `None` for a command that is not input.
+pub fn routes(command: &str) -> Option<serde_json::Value> {
+    use serde_json::json;
+    let cdp = json!({ "default": true, "takes_focus": false });
+    let os = json!({ "takes_focus": true, "needs": "the app in front: `window activate`" });
+    match command {
+        "click" | "key" if cfg!(windows) => Some(json!({ "cdp": cdp, "os": os })),
+        "type" if cfg!(windows) => Some(json!({
+            "cdp": { "default": true, "takes_focus": false, "ime_composition": true },
+            "os": { "takes_focus": true, "needs": "the app in front: `window activate`", "ime_composition": false },
+        })),
+        "hold" if cfg!(windows) => Some(json!({ "cdp": cdp })),
+        _ => None,
+    }
+}
+
 /// Why `command` (a command-line name) is refused on this platform.
 pub fn reason(command: &str) -> &'static str {
     if cfg!(target_os = "macos") {

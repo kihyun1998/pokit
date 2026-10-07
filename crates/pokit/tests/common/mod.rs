@@ -128,6 +128,22 @@ impl Pokit {
         }
     }
 
+    /// An element's text, as `read` gives it.
+    pub fn read_text(&self, target: &str) -> String {
+        self.run(&["read", target]).out["text"]
+            .as_str()
+            .unwrap_or("")
+            .to_string()
+    }
+
+    /// An element's value, as `read` gives it.
+    pub fn read_value(&self, target: &str) -> String {
+        self.run(&["read", target]).out["value"]
+            .as_str()
+            .unwrap_or("")
+            .to_string()
+    }
+
     pub fn app_pid(&self) -> u32 {
         self.launched.as_ref().unwrap()["app_pid"].as_u64().unwrap() as u32
     }

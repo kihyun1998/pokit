@@ -9,6 +9,15 @@ pub const HOLD_ACK_WAIT: Duration = Duration::from_secs(15);
 /// How much longer than its own timeout the CLI waits for `trace stop`, which reads the trace.
 pub const TRACE_STOP_WAIT: Duration = Duration::from_secs(60);
 
+/// How input reaches the page: CDP, straight into the page, or OS input through `SendInput`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum Route {
+    #[default]
+    Cdp,
+    Os,
+}
+
 /// One command for the session, with its arguments.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "command", content = "args", rename_all = "snake_case")]
@@ -31,17 +40,23 @@ pub enum Request {
         right: bool,
         hover: bool,
         require_focus: Option<String>,
+        #[serde(default)]
+        route: Route,
     },
     Type {
         text: String,
         secret: bool,
         into: Option<String>,
         require_focus: Option<String>,
+        #[serde(default)]
+        route: Route,
     },
     Key {
         chord: String,
         into: Option<String>,
         require_focus: Option<String>,
+        #[serde(default)]
+        route: Route,
     },
     Hold {
         chord: String,
@@ -65,6 +80,7 @@ pub enum Request {
         text: String,
         secret: bool,
     },
+    WindowActivate,
     NativeList,
     NativeChoose {
         path: String,
@@ -118,6 +134,7 @@ pub enum CommandKind {
     MeasureStop,
     ClipboardRead,
     ClipboardWrite,
+    WindowActivate,
     NativeList,
     NativeChoose,
     NativeAnswer,
@@ -149,6 +166,7 @@ impl Request {
             Request::MeasureStop { .. } => CommandKind::MeasureStop,
             Request::ClipboardRead => CommandKind::ClipboardRead,
             Request::ClipboardWrite { .. } => CommandKind::ClipboardWrite,
+            Request::WindowActivate => CommandKind::WindowActivate,
             Request::NativeList => CommandKind::NativeList,
             Request::NativeChoose { .. } => CommandKind::NativeChoose,
             Request::NativeAnswer { .. } => CommandKind::NativeAnswer,
@@ -212,6 +230,7 @@ impl CommandKind {
             CommandKind::MeasureStop => "measure_stop",
             CommandKind::ClipboardRead => "clipboard_read",
             CommandKind::ClipboardWrite => "clipboard_write",
+            CommandKind::WindowActivate => "window_activate",
             CommandKind::NativeList => "native_list",
             CommandKind::NativeChoose => "native_choose",
             CommandKind::NativeAnswer => "native_answer",
@@ -246,6 +265,7 @@ impl CommandKind {
             | CommandKind::MeasureStop
             | CommandKind::ClipboardRead
             | CommandKind::ClipboardWrite
+            | CommandKind::WindowActivate
             | CommandKind::NativeList
             | CommandKind::NativeChoose
             | CommandKind::NativeAnswer
@@ -276,6 +296,7 @@ impl CommandKind {
             | CommandKind::MeasureStop
             | CommandKind::ClipboardRead
             | CommandKind::ClipboardWrite
+            | CommandKind::WindowActivate
             | CommandKind::NativeList
             | CommandKind::NativeChoose
             | CommandKind::NativeAnswer
@@ -307,6 +328,7 @@ impl CommandKind {
             | CommandKind::MeasureStop
             | CommandKind::ClipboardRead
             | CommandKind::ClipboardWrite
+            | CommandKind::WindowActivate
             | CommandKind::NativeList
             | CommandKind::NativeChoose
             | CommandKind::NativeAnswer
@@ -346,17 +368,20 @@ mod tests {
                 right: false,
                 hover: false,
                 require_focus: None,
+                route: Route::Os,
             },
             Request::Type {
                 text: "a".into(),
                 secret: false,
                 into: None,
                 require_focus: None,
+                route: Route::Cdp,
             },
             Request::Key {
                 chord: "Enter".into(),
                 into: None,
                 require_focus: None,
+                route: Route::Os,
             },
             Request::Hold {
                 chord: "Ctrl+Equal".into(),
@@ -380,6 +405,7 @@ mod tests {
                 text: "a".into(),
                 secret: false,
             },
+            Request::WindowActivate,
             Request::NativeList,
             Request::NativeChoose {
                 path: "File > Open".into(),

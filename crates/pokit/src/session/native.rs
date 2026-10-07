@@ -13,13 +13,35 @@ use serde_json::json;
 
 impl State {
     /// The launched app's process; an attached session does not know it.
-    fn native_pid(&self) -> Result<u32, Failure> {
+    pub(super) fn native_pid(&self) -> Result<u32, Failure> {
         self.app_pid.ok_or_else(|| {
             Failure::new(
                 Kind::Unsupported,
                 "native needs the app's process, which only a launched session knows",
             )
         })
+    }
+
+    pub(super) async fn window_activate_cmd(&self) -> Outcome {
+        let pid = self.native_pid()?;
+        let previous = crate::proc::foreground().1;
+        match blocking(move || crate::os_input::activate(pid)).await? {
+            Some(how) => Ok(fields! {
+                "frontmost" => true,
+                "how" => format!("{how:?}"),
+                "previous_pid" => previous,
+            }),
+            None => Err(Failure::new(
+                Kind::GuardRefused,
+                "Windows did not let the app come to the front",
+            )
+            .with("foreground_pid", crate::proc::foreground().1)),
+        }
+    }
+
+    /// The launched app's process, for OS input; an attached session does not know it.
+    pub(super) fn os_pid(&self) -> Result<u32, Failure> {
+        self.native_pid()
     }
 
     pub(super) async fn native_list_cmd(&self) -> Outcome {
@@ -119,7 +141,7 @@ impl State {
 }
 
 /// Runs a blocking Win32 or UI Automation call off the async runtime.
-async fn blocking<T: Send + 'static>(
+pub(super) async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> Result<T, String> + Send + 'static,
 ) -> Result<T, Failure> {
     tokio::task::spawn_blocking(f)

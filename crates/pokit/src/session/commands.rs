@@ -9,7 +9,7 @@ use crate::hangul;
 use crate::home::Mode;
 use crate::output::{self, Failure, Fields, Kind, Outcome};
 use crate::redact::redact;
-use crate::request::Request;
+use crate::request::{Request, Route};
 use crate::snapshot;
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -53,6 +53,7 @@ impl State {
                 right,
                 hover,
                 require_focus,
+                route,
             } => {
                 let at = match (target, x, y) {
                     (Some(t), _, _) => Some(ClickAt::Element(t)),
@@ -63,6 +64,7 @@ impl State {
                     double: *double,
                     right: *right,
                     hover: *hover,
+                    route: *route,
                 };
                 self.click_cmd(at, how, require_focus.as_deref()).await
             }
@@ -70,19 +72,39 @@ impl State {
                 text,
                 into,
                 require_focus,
+                route,
                 ..
-            } => {
-                self.type_cmd(text, into.as_deref(), require_focus.as_deref())
-                    .await
-            }
+            } => match route {
+                Route::Cdp => {
+                    self.type_cmd(text, into.as_deref(), require_focus.as_deref())
+                        .await
+                }
+                #[cfg(windows)]
+                Route::Os => {
+                    self.os_type_cmd(text, into.as_deref(), require_focus.as_deref())
+                        .await
+                }
+                #[cfg(not(windows))]
+                Route::Os => Err(os_route_unsupported()),
+            },
             Request::Key {
                 chord,
                 into,
                 require_focus,
-            } => {
-                self.key_cmd(chord, into.as_deref(), require_focus.as_deref())
-                    .await
-            }
+                route,
+            } => match route {
+                Route::Cdp => {
+                    self.key_cmd(chord, into.as_deref(), require_focus.as_deref())
+                        .await
+                }
+                #[cfg(windows)]
+                Route::Os => {
+                    self.os_key_cmd(chord, into.as_deref(), require_focus.as_deref())
+                        .await
+                }
+                #[cfg(not(windows))]
+                Route::Os => Err(os_route_unsupported()),
+            },
             Request::Hold {
                 chord,
                 count,
@@ -113,6 +135,13 @@ impl State {
                 )
                 .await
             }
+            #[cfg(windows)]
+            Request::WindowActivate => self.window_activate_cmd().await,
+            #[cfg(not(windows))]
+            Request::WindowActivate => Err(Failure::new(
+                Kind::Unsupported,
+                "window activation is not built on this platform yet",
+            )),
             #[cfg(windows)]
             Request::NativeList => self.native_list_cmd().await,
             #[cfg(windows)]
@@ -472,6 +501,10 @@ impl State {
         how: ClickHow,
         require_focus: Option<&str>,
     ) -> Outcome {
+        #[cfg(windows)]
+        if how.route == Route::Os {
+            self.refuse_unless_front().await?;
+        }
         let (cdp, x, y) = match at {
             Some(ClickAt::Element(t)) => {
                 let (tid, cdp, obj) = self.resolve(t).await?;
@@ -504,6 +537,12 @@ impl State {
                 ));
             }
         };
+        if how.route == Route::Os {
+            #[cfg(windows)]
+            return self.os_click(&cdp, x, y, &how).await;
+            #[cfg(not(windows))]
+            return Err(os_route_unsupported());
+        }
         let mouse = |kind: &str, button: &str, count: i64| json!({ "type": kind, "x": x, "y": y, "button": button, "clickCount": count });
         let mut sent = vec![Instant::now()];
         cdp.call("Input.dispatchMouseEvent", mouse("mouseMoved", "none", 0))
@@ -702,10 +741,11 @@ enum ClickAt<'a> {
 }
 
 /// Which click: a hover, a right click, or a single or double left click.
-struct ClickHow {
-    double: bool,
-    right: bool,
-    hover: bool,
+pub(super) struct ClickHow {
+    pub(super) double: bool,
+    pub(super) right: bool,
+    pub(super) hover: bool,
+    pub(super) route: Route,
 }
 
 /// What `wait` waits for.
@@ -761,6 +801,15 @@ async fn commit(cdp: &Cdp, text: &str, sent: &mut Vec<Instant>) -> Result<(), Fa
     cdp.call("Input.insertText", json!({ "text": text }))
         .await?;
     Ok(())
+}
+
+/// `--route os` where OS input is not built yet.
+#[cfg(not(windows))]
+fn os_route_unsupported() -> Failure {
+    Failure::new(
+        Kind::Unsupported,
+        "OS input is not built on this platform yet",
+    )
 }
 
 /// Presses and releases `p`, noting when each event was sent.

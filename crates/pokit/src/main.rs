@@ -11,6 +11,7 @@ mod hangul;
 mod home;
 mod measure;
 mod native;
+mod os_input;
 mod output;
 mod plugin;
 mod proc;
@@ -71,6 +72,12 @@ enum MeasureAction {
         #[arg(long, default_value_t = 10_000)]
         ceiling: u64,
     },
+}
+
+#[derive(Subcommand)]
+enum WindowAction {
+    /// Bring the app's main window to the front, taking the user's focus: OS input needs it.
+    Activate,
 }
 
 #[derive(Subcommand)]
@@ -191,6 +198,9 @@ enum Command {
         hover: bool,
         #[arg(long)]
         require_focus: Option<String>,
+        /// `os` sends OS input, which needs the app in front (`window activate`) and moves the cursor.
+        #[arg(long, value_enum, default_value_t = request::Route::Cdp)]
+        route: request::Route,
     },
     /// Type text into the focused element, or into `--into`.
     Type {
@@ -205,6 +215,9 @@ enum Command {
         into: Option<String>,
         #[arg(long)]
         require_focus: Option<String>,
+        /// `os` types through the OS, which needs the app in front, without IME composition.
+        #[arg(long, value_enum, default_value_t = request::Route::Cdp)]
+        route: request::Route,
     },
     /// Press a chord written with physical key names, e.g. `Ctrl+Equal`, into the focused element or `--into`.
     Key {
@@ -213,6 +226,9 @@ enum Command {
         into: Option<String>,
         #[arg(long)]
         require_focus: Option<String>,
+        /// `os` presses the keys through the OS, which needs the app in front.
+        #[arg(long, value_enum, default_value_t = request::Route::Cdp)]
+        route: request::Route,
     },
     /// Send N key-downs at a fixed interval without waiting for the page, then one key-up.
     Hold {
@@ -231,6 +247,11 @@ enum Command {
     Measure {
         #[command(subcommand)]
         action: MeasureAction,
+    },
+    /// Operate the launched app's main window.
+    Window {
+        #[command(subcommand)]
+        action: WindowAction,
     },
     /// Read the launched app's menu bars and dialogs, choose a menu entry, or answer a dialog.
     Native {
@@ -426,6 +447,7 @@ fn dispatch(cli: Cli) -> (String, i32, Value) {
             right,
             hover,
             require_focus,
+            route,
         } => Request::Click {
             target,
             x,
@@ -434,6 +456,7 @@ fn dispatch(cli: Cli) -> (String, i32, Value) {
             right,
             hover,
             require_focus,
+            route,
         },
         Command::Type {
             text,
@@ -441,6 +464,7 @@ fn dispatch(cli: Cli) -> (String, i32, Value) {
             secret_env,
             into,
             require_focus,
+            route,
         } => {
             let (text, secret) = match secret_text("type", text, secret, secret_env) {
                 Ok(t) => t,
@@ -451,16 +475,19 @@ fn dispatch(cli: Cli) -> (String, i32, Value) {
                 secret,
                 into,
                 require_focus,
+                route,
             }
         }
         Command::Key {
             chord,
             into,
             require_focus,
+            route,
         } => Request::Key {
             chord,
             into,
             require_focus,
+            route,
         },
         Command::Hold {
             chord,
@@ -495,6 +522,9 @@ fn dispatch(cli: Cli) -> (String, i32, Value) {
             quiet_ms: quiet,
             ceiling_ms: ceiling,
         },
+        Command::Window {
+            action: WindowAction::Activate,
+        } => Request::WindowActivate,
         Command::Native {
             action: NativeAction::List,
         } => Request::NativeList,
@@ -700,7 +730,13 @@ fn capabilities() -> output::Fields {
     {
         let support = match sub.get_name() {
             "capabilities" => json!({ "supported": true }),
-            name if support::answers(name) => json!({ "supported": true, "route": output::ENGINE }),
+            "window" if support::answers("window") => {
+                json!({ "supported": true, "takes_focus": true })
+            }
+            name if support::answers(name) => match support::routes(name) {
+                Some(routes) => json!({ "supported": true, "routes": routes }),
+                None => json!({ "supported": true, "route": output::ENGINE }),
+            },
             name => json!({ "supported": false, "reason": support::reason(name) }),
         };
         commands.insert(sub.get_name().to_string(), support);
