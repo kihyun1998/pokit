@@ -132,6 +132,7 @@ impl State {
         let modifiers_down = strokes[..held].to_vec();
         let key_down = strokes[held].clone();
         let release: Vec<String> = strokes[held + 1..].iter().map(|(c, _)| c.clone()).collect();
+        *self.keys_down.lock().unwrap() = release.clone();
         let mut sent = Vec::with_capacity(count as usize + 1);
         let pressed = async {
             if !modifiers_down.is_empty() {
@@ -151,7 +152,19 @@ impl State {
         sent.push(Instant::now());
         let up = release.clone();
         let _ = tokio::task::spawn_blocking(move || crate::os_input::release(&up)).await;
-        pressed.map(|_| sent)
+        self.keys_down.lock().unwrap().clear();
+        // `sent` also holds the key-down that was refused and the release.
+        let downs = sent.len().saturating_sub(2);
+        pressed.map(|_| sent).map_err(|mut f| {
+            if downs > 0 {
+                let why = f.message.trim_end_matches(". Nothing was sent");
+                let why = why.trim_end_matches("; nothing was sent");
+                f.message = format!(
+                    "{why}, after {downs} of {count} key-downs; every key pokit pressed was released"
+                );
+            }
+            f
+        })
     }
 
     /// Turns the wheel through the OS over a page point.

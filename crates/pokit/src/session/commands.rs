@@ -28,6 +28,11 @@ impl State {
                 secrets.push(text.to_string());
             }
         }
+        let _one_at_a_time = if request.sends_os_input() {
+            Some(self.os_input.lock().await)
+        } else {
+            None
+        };
         let outcome = match &request {
             Request::Ping => Ok(Fields::new()),
             Request::Status => Ok(self.status()),
@@ -778,8 +783,10 @@ impl State {
                     &cdp,
                     &obj,
                     "function() { const r = this.getBoundingClientRect();
-                        return { x: r.left + r.width / 2, y: r.top + r.height / 2,
-                                 inside: r.bottom > 0 && r.right > 0 && r.top < innerHeight && r.left < innerWidth }; }",
+                        const left = Math.max(r.left, 0), right = Math.min(r.right, innerWidth);
+                        const top = Math.max(r.top, 0), bottom = Math.min(r.bottom, innerHeight);
+                        return { x: (left + right) / 2, y: (top + bottom) / 2,
+                                 inside: right > left && bottom > top }; }",
                     &[],
                 )
                 .await?;
@@ -798,6 +805,17 @@ impl State {
             (None, Some(x), Some(y)) => {
                 let (tid, cdp) = self.current()?;
                 self.ensure_ready(&tid, &cdp).await?;
+                let size = evaluate(&cdp, "[innerWidth, innerHeight]").await?;
+                let (w, h) = (
+                    size[0].as_f64().unwrap_or(0.0),
+                    size[1].as_f64().unwrap_or(0.0),
+                );
+                if !(0.0..w).contains(&x) || !(0.0..h).contains(&y) {
+                    return Err(Failure::new(
+                        Kind::NotFound,
+                        format!("({x}, {y}) is outside the page's {w}x{h} viewport"),
+                    ));
+                }
                 (cdp, x, y)
             }
             _ => {

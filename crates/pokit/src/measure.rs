@@ -258,9 +258,11 @@ pub fn summarize(raw: &Value, t: &Thresholds) -> Fields {
 
 /// How long each key took from leaving pokit to the page starting to handle it: the measurement's
 /// keys paired in order with the key-downs pokit sent during it (`sent`, page-clock epoch ms).
+/// Only when the page handled exactly as many key-downs as pokit sent; otherwise no pairing can
+/// be trusted, and the numbers say why.
 pub fn latency(raw: &Value, sent: &[f64], uncertainty_ms: f64) -> Value {
     let origin = raw["origin"].as_f64().unwrap_or(0.0);
-    let dispatched: Vec<f64> = raw["keys"]
+    let handled: Vec<f64> = raw["keys"]
         .as_array()
         .map(|keys| {
             keys.iter()
@@ -269,12 +271,23 @@ pub fn latency(raw: &Value, sent: &[f64], uncertainty_ms: f64) -> Value {
                 .collect()
         })
         .unwrap_or_default();
-    let paired = dispatched.len().min(sent.len());
-    let mut lat: Vec<f64> = dispatched.iter().zip(sent).map(|(d, s)| d - s).collect();
+    let mut lat: Vec<f64> = if handled.len() == sent.len() {
+        handled.iter().zip(sent).map(|(h, s)| h - s).collect()
+    } else {
+        Vec::new()
+    };
     lat.sort_by(f64::total_cmp);
     let (p50, p95, max) = if lat.is_empty() {
-        let none = json!("no key paired with a send");
-        (none.clone(), none.clone(), none)
+        let why = if sent.is_empty() {
+            json!("pokit sent no keys with `hold` during the measurement")
+        } else {
+            json!(format!(
+                "the page handled {} key-downs and pokit sent {}, so they cannot be paired",
+                handled.len(),
+                sent.len()
+            ))
+        };
+        (why.clone(), why.clone(), why)
     } else {
         (
             json!(round1(percentile(&lat, 50.0))),
@@ -283,13 +296,13 @@ pub fn latency(raw: &Value, sent: &[f64], uncertainty_ms: f64) -> Value {
         )
     };
     json!({
-        "keys": paired,
+        "keys": lat.len(),
         "p50_ms": p50,
         "p95_ms": p95,
         "max_ms": max,
         "uncertainty_ms": uncertainty_ms,
-        "unpaired_keys": dispatched.len() - paired,
-        "unpaired_sends": sent.len() - paired,
+        "handled_keys": handled.len(),
+        "sent_keys": sent.len(),
     })
 }
 
@@ -428,16 +441,34 @@ mod tests {
             "origin": 1000.0,
             "keys": [[0.0, 10.0, 12.0, false], [0.0, 50.0, 52.0, true], [0.0, 95.0, 96.0, true]],
         });
-        let l = latency(&raw, &[1005.0, 1040.0, 1080.0, 1120.0], 0.3);
+        let l = latency(&raw, &[1005.0, 1040.0, 1080.0], 0.3);
         assert_eq!(
             l,
             json!({ "keys": 3, "p50_ms": 10.0, "p95_ms": 15.0, "max_ms": 15.0,
-                    "uncertainty_ms": 0.3, "unpaired_keys": 0, "unpaired_sends": 1 })
+                    "uncertainty_ms": 0.3, "handled_keys": 3, "sent_keys": 3 })
         );
         let none = latency(&raw, &[], 0.3);
         assert_eq!(none["keys"], 0);
-        assert_eq!(none["p50_ms"], "no key paired with a send");
-        assert_eq!(none["unpaired_keys"], 3);
+        assert_eq!(
+            none["p50_ms"],
+            "pokit sent no keys with `hold` during the measurement"
+        );
+    }
+
+    #[test]
+    fn latency_is_not_paired_when_the_page_saw_other_keys_than_pokit_sent() {
+        let raw = json!({
+            "origin": 1000.0,
+            "keys": [[0.0, 10.0, 12.0, false], [0.0, 50.0, 52.0, true], [0.0, 95.0, 96.0, true]],
+        });
+        let l = latency(&raw, &[1005.0, 1040.0, 1080.0, 1120.0], 0.3);
+        assert_eq!(l["keys"], 0);
+        assert_eq!(
+            l["p95_ms"],
+            "the page handled 3 key-downs and pokit sent 4, so they cannot be paired"
+        );
+        assert_eq!(l["handled_keys"], 3);
+        assert_eq!(l["sent_keys"], 4);
     }
 
     #[test]

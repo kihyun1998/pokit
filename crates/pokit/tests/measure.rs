@@ -218,5 +218,5 @@ fn a_held_chord_counts_its_key_not_its_modifiers() {
     assert_eq!(m.code, 0, "{}", m.out);
     assert_eq!(m.out["keys"]["handled"], 5, "{}", m.out);
     assert_eq!(m.out["latency"]["keys"], 5, "{}", m.out);
-    assert_eq!(m.out["latency"]["unpaired_keys"], 0, "{}", m.out);
+    assert_eq!(m.out["latency"]["sent_keys"], 5, "{}", m.out);
 }

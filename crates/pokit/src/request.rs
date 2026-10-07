@@ -166,6 +166,18 @@ pub enum CommandKind {
 }
 
 impl Request {
+    /// Whether the command sends input through the OS, on the user's keyboard and mouse.
+    pub fn sends_os_input(&self) -> bool {
+        match self {
+            Request::Click { route, .. }
+            | Request::Type { route, .. }
+            | Request::Key { route, .. }
+            | Request::Wheel { route, .. } => *route == Route::Os,
+            Request::Hold { route, compare, .. } => *route == Route::Os || *compare,
+            _ => false,
+        }
+    }
+
     pub fn kind(&self) -> CommandKind {
         match self {
             Request::Ping => CommandKind::Ping,

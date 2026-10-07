@@ -37,6 +37,7 @@ fn clear_events(p: &Pokit) {
 
 #[test]
 fn os_input_to_an_app_not_in_front_is_refused_and_sends_nothing() {
+    let _front = front();
     let p = Pokit::launch_fixture("os-guard");
     clear_events(&p);
     assert_eq!(p.run(&["eval", "window.scrollTo(0, 0); true"]).code, 0);
@@ -48,6 +49,15 @@ fn os_input_to_an_app_not_in_front_is_refused_and_sends_nothing() {
             "hold", "KeyA", "--count", "3", "--into", "#name", "--route", "os",
         ][..],
         &["wheel", "--notches", "1", "--route", "os"][..],
+        &[
+            "hold",
+            "KeyA",
+            "--count",
+            "3",
+            "--into",
+            "#name",
+            "--compare",
+        ][..],
     ] {
         let r = p.run(args);
         assert_eq!(r.code, 6, "{args:?}: {}", r.out);
@@ -248,7 +258,8 @@ fn hold_wheel_and_the_comparison_run_on_both_routes() {
     assert_eq!(
         p.run(&[
             "eval",
-            "window.__repeats = []; document.querySelector('#stall').addEventListener('keydown',              e => { if (e.code === 'KeyB') window.__repeats.push(e.repeat); }); true"
+            "window.__repeats = []; document.querySelector('#stall').addEventListener('keydown', \
+             e => { if (e.code === 'KeyB') window.__repeats.push(e.repeat); }); true"
         ])
         .code,
         0
@@ -292,22 +303,58 @@ fn hold_wheel_and_the_comparison_run_on_both_routes() {
         .code,
         0
     );
+    let (cdp_top, cdp_wheels) = wheeled(&p, "1", "cdp");
+    let (os_top, os_wheels) = wheeled(&p, "1", "os");
+    assert!(
+        os_top.as_f64().unwrap() > 0.0,
+        "one OS notch scrolled nothing"
+    );
+    assert_eq!(cdp_top, os_top, "one notch scrolls as far on either route");
+    assert_eq!(cdp_wheels.len(), 1, "{cdp_wheels:?}");
+    assert_eq!(
+        cdp_wheels, os_wheels,
+        "one notch is one wheel event of the same delta"
+    );
+
+    let r = p.run(&[
+        "eval",
+        "document.body.style.paddingBottom = '3000px'; \
+         window.scrollTo(0, document.querySelector('#scroller').getBoundingClientRect().bottom \
+         + scrollY + 100); document.querySelector('#scroller').getBoundingClientRect().bottom < 0",
+    ]);
+    assert_eq!(
+        r.out["value"], true,
+        "the scroller did not leave the view: {}",
+        r.out
+    );
     for route in ["cdp", "os"] {
-        let (top, wheels) = wheeled(&p, "1", route);
-        assert_eq!(top, 100, "{route}: one notch scrolls 100 CSS pixels");
-        assert_eq!(wheels, vec!["wheel:100"], "{route}");
-    }
-    let (top, _) = wheeled(&p, "1", "os");
-    assert_eq!(top, 100);
-    let r = p.run(&["eval", "document.querySelector('#scroller').scrollIntoView(false);                               window.scrollTo(0, 0);                               document.querySelector('#scroller').getBoundingClientRect().top > innerHeight"]);
-    if r.out["value"] == true {
-        let r = p.run(&["wheel", "#scroller", "--notches", "1"]);
+        let r = p.run(&["wheel", "#scroller", "--notches", "1", "--route", route]);
         assert_eq!(
             r.code, 5,
-            "a wheel over an element out of view went ahead: {}",
+            "{route}: a wheel over an element out of view: {}",
             r.out
         );
+        let r = p.run(&[
+            "wheel",
+            "--x",
+            "5",
+            "--y",
+            "100000",
+            "--notches",
+            "1",
+            "--route",
+            route,
+        ]);
+        assert_eq!(r.code, 5, "{route}: a wheel below the viewport: {}", r.out);
     }
+    assert_eq!(
+        p.run(&[
+            "eval",
+            "document.body.style.paddingBottom = ''; window.scrollTo(0, 0); true"
+        ])
+        .code,
+        0
+    );
 
     let r = p.run(&[
         "hold",
@@ -329,4 +376,22 @@ fn hold_wheel_and_the_comparison_run_on_both_routes() {
     }
     assert!(r.out["os_minus_cdp"]["p50_ms"].is_number(), "{}", r.out);
     assert!(r.out["clock"]["uncertainty_ms"].is_number(), "{}", r.out);
+
+    assert_eq!(p.run(&["measure", "start"]).code, 0);
+    let r = p.run(&[
+        "hold",
+        "KeyA",
+        "--count",
+        "2",
+        "--into",
+        "#stall",
+        "--compare",
+    ]);
+    assert_eq!(
+        r.code, 6,
+        "--compare took over a running measurement: {}",
+        r.out
+    );
+    let m = p.run(&["measure", "stop", "--quiet", "300"]);
+    assert_eq!(m.code, 0, "the running measurement was lost: {}", m.out);
 }

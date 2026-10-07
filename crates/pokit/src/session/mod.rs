@@ -108,6 +108,11 @@ struct State {
     /// How many times the app took the foreground during launch and was made to give it back,
     /// and how many times Windows refused that.
     foreground_given_back: Mutex<(u32, u32)>,
+    /// Held by an OS input command while it runs, so two never interleave on the user's keyboard.
+    os_input: tokio::sync::Mutex<()>,
+    /// The keys `hold --route os` has down right now, released when the session ends.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    keys_down: Mutex<Vec<String>>,
 }
 
 /// Runs the session process until `close`, idle timeout, or the launched app exits.
@@ -220,6 +225,8 @@ async fn serve(mut config: Config) {
         waiters: Mutex::default(),
         clipboard: Mutex::default(),
         foreground_given_back: Mutex::default(),
+        os_input: tokio::sync::Mutex::new(()),
+        keys_down: Mutex::default(),
     });
 
     if let Some(child) = app.as_mut() {
@@ -425,6 +432,8 @@ impl State {
 
     /// Ends the session: removes probes left in an attached app, closes a launched one, and exits.
     async fn shutdown(&self) -> ! {
+        #[cfg(windows)]
+        crate::os_input::release(&self.keys_down.lock().unwrap());
         if self.config.mode == Mode::Attach {
             self.remove_probes().await;
         }

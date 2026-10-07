@@ -120,7 +120,8 @@ impl State {
                 ))
             }
         };
-        self.note_key_downs(&sent[..hold.count as usize]);
+        let (target, _) = self.current()?;
+        self.note_key_downs(&target, &sent[..hold.count as usize]);
         let f = fields! {
             "key" => press.key,
             "code" => press.code,
@@ -146,19 +147,30 @@ impl State {
         let (modifier_downs, modifier_ups) = press.modifier_events();
         let mut sent = Vec::with_capacity(count as usize + 1);
         let mut replies: Vec<Reply> = Vec::new();
-        for event in modifier_downs {
-            replies.push(cdp.send("Input.dispatchKeyEvent", event)?);
+        let pressed = async {
+            for event in modifier_downs {
+                replies.push(cdp.send("Input.dispatchKeyEvent", event)?);
+            }
+            let start = tokio::time::Instant::now();
+            for n in 0..=count {
+                tokio::time::sleep_until(start + interval * n).await;
+                let event = if n < count {
+                    press.down_event(n > 0)
+                } else {
+                    press.up_event()
+                };
+                sent.push(Instant::now());
+                replies.push(cdp.send("Input.dispatchKeyEvent", event)?);
+            }
+            Ok::<_, Failure>(())
         }
-        let start = tokio::time::Instant::now();
-        for n in 0..=count {
-            tokio::time::sleep_until(start + interval * n).await;
-            let event = if n < count {
-                press.down_event(n > 0)
-            } else {
-                press.up_event()
-            };
-            sent.push(Instant::now());
-            replies.push(cdp.send("Input.dispatchKeyEvent", event)?);
+        .await;
+        if let Err(f) = pressed {
+            let _ = cdp.send("Input.dispatchKeyEvent", press.up_event());
+            for event in modifier_ups {
+                let _ = cdp.send("Input.dispatchKeyEvent", event);
+            }
+            return Err(f);
         }
         for event in modifier_ups {
             replies.push(cdp.send("Input.dispatchKeyEvent", event)?);
@@ -174,12 +186,16 @@ impl State {
         Ok((sent, acknowledged))
     }
 
-    /// Keeps the page-clock times of key-downs sent while a measurement runs, for its latency.
-    fn note_key_downs(&self, sent: &[Instant]) {
+    /// Keeps the page-clock times of key-downs sent to `target` while a measurement runs there,
+    /// for its latency.
+    fn note_key_downs(&self, target: &str, sent: &[Instant]) {
         let Some(c) = self.clock.lock().unwrap().as_ref().map(|(_, c)| *c) else {
             return;
         };
         if let Some(m) = self.measuring.lock().unwrap().as_mut() {
+            if m.target != target {
+                return;
+            }
             m.key_downs
                 .extend(sent.iter().map(|i| c.page_time(clock::local_ms(*i))));
         }
@@ -188,6 +204,20 @@ impl State {
     /// `hold --compare`: the same keys on CDP and then through the OS, each inside its own
     /// measurement, and how much longer the OS route took from send to handling.
     pub(super) async fn hold_compare_cmd(&self, hold: Hold<'_>) -> Outcome {
+        if self.measuring.lock().unwrap().is_some() {
+            return Err(Failure::new(
+                Kind::GuardRefused,
+                "a measurement is running, and --compare takes its own; run `measure stop` first",
+            ));
+        }
+        if cfg!(not(windows)) {
+            return Err(Failure::new(
+                Kind::Unsupported,
+                "OS input is not built on this platform yet",
+            ));
+        }
+        #[cfg(windows)]
+        self.refuse_unless_front().await?;
         let mut runs = serde_json::Map::new();
         for route in [Route::Cdp, Route::Os] {
             self.measure_start_cmd(
