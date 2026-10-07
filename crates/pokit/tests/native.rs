@@ -337,3 +337,44 @@ fn the_tray_icon_is_clicked_and_its_menu_chosen_in() {
     );
     eprintln!("the app took the foreground at the tray menu: {took}");
 }
+
+#[test]
+fn a_file_is_picked_in_the_apps_file_dialog() {
+    let _focus = FOCUS.lock().unwrap_or_else(|e| e.into_inner());
+    let p = Pokit::launch_fixture("native-file");
+    let before = window::foreground();
+    let file = p.home.join("pick me.txt");
+    std::fs::write(&file, "picked").unwrap();
+
+    assert_eq!(p.run(&["native", "pick", file.to_str().unwrap()]).code, 5);
+
+    assert_eq!(p.run(&["click", "#pick-file"]).code, 0);
+    let mut found = Vec::new();
+    assert!(
+        eventually(10_000, || {
+            found = p.run(&["native", "list"]).out["dialogs"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            found.iter().any(|d| d["file"] == true)
+        }),
+        "no file dialog opened: {found:?}"
+    );
+    let took = window::window_pid(window::foreground()) == p.app_pid();
+
+    let r = p.run(&["native", "pick", file.to_str().unwrap()]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert_eq!(r.out["dialog"], "pokit fixture file", "{}", r.out);
+    assert!(
+        eventually(5000, || native_result(&p).starts_with("picked ")
+            && native_result(&p).ends_with("pick me.txt")),
+        "{:?}",
+        native_result(&p)
+    );
+    assert!(dialogs(&p, 0).is_empty());
+    assert!(
+        !took || eventually(2500, || window::foreground() == before),
+        "the file dialog kept the foreground"
+    );
+    eprintln!("the app took the foreground at the file dialog: {took}");
+}

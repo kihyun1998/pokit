@@ -128,6 +128,11 @@ pub enum Request {
         dialog: Option<String>,
     },
     NativeDismiss,
+    NativePick {
+        /// An absolute path; a relative one would be taken from the dialog's folder.
+        path: String,
+        dialog: Option<String>,
+    },
     NativeTray {
         #[serde(default)]
         index: usize,
@@ -193,6 +198,7 @@ pub enum CommandKind {
     NativeChoose,
     NativeAnswer,
     NativeDismiss,
+    NativePick,
     NativeTray,
     TraceStart,
     TraceStop,
@@ -244,6 +250,7 @@ impl Request {
             Request::NativeChoose { .. } => CommandKind::NativeChoose,
             Request::NativeAnswer { .. } => CommandKind::NativeAnswer,
             Request::NativeDismiss => CommandKind::NativeDismiss,
+            Request::NativePick { .. } => CommandKind::NativePick,
             Request::NativeTray { .. } => CommandKind::NativeTray,
             Request::TraceStart => CommandKind::TraceStart,
             Request::TraceStop => CommandKind::TraceStop,
@@ -324,6 +331,7 @@ impl CommandKind {
             CommandKind::NativeChoose => "native_choose",
             CommandKind::NativeAnswer => "native_answer",
             CommandKind::NativeDismiss => "native_dismiss",
+            CommandKind::NativePick => "native_pick",
             CommandKind::NativeTray => "native_tray",
             CommandKind::TraceStart => "trace_start",
             CommandKind::TraceStop => "trace_stop",
@@ -365,6 +373,7 @@ impl CommandKind {
             | CommandKind::NativeChoose
             | CommandKind::NativeAnswer
             | CommandKind::NativeDismiss
+            | CommandKind::NativePick
             | CommandKind::NativeTray
             | CommandKind::TraceStart
             | CommandKind::TraceStop
@@ -402,6 +411,7 @@ impl CommandKind {
             | CommandKind::NativeChoose
             | CommandKind::NativeAnswer
             | CommandKind::NativeDismiss
+            | CommandKind::NativePick
             | CommandKind::NativeTray
             | CommandKind::TraceStart
             | CommandKind::TraceStop
@@ -440,6 +450,7 @@ impl CommandKind {
             | CommandKind::NativeChoose
             | CommandKind::NativeAnswer
             | CommandKind::NativeDismiss
+            | CommandKind::NativePick
             | CommandKind::NativeTray
             | CommandKind::TraceStart
             | CommandKind::TraceStop
@@ -548,6 +559,10 @@ mod tests {
                 dialog: None,
             },
             Request::NativeDismiss,
+            Request::NativePick {
+                path: "C:/a.txt".into(),
+                dialog: None,
+            },
             Request::NativeTray {
                 index: 1,
                 right: true,

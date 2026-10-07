@@ -32,6 +32,9 @@ pub struct Dialog {
     pub title: String,
     pub text: Vec<String>,
     pub buttons: Vec<String>,
+    /// Whether it is a file dialog, with a file name box `native pick` fills.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub file: bool,
     #[serde(skip)]
     pub hwnd: isize,
 }
@@ -125,7 +128,7 @@ pub enum Refusal {
 
 #[cfg(windows)]
 pub use win::{
-    answer, choose, click_tray, context_menu, context_menu_open, dialogs, dismiss, menus,
+    answer, choose, click_tray, context_menu, context_menu_open, dialogs, dismiss, menus, pick,
     tray_icons,
 };
 
@@ -145,11 +148,11 @@ mod win {
     use windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
     use windows::Win32::UI::Input::KeyboardAndMouse::{VK_ESCAPE, VK_RETURN, VK_RIGHT};
     use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetClassNameW, GetDlgCtrlID, GetMenu, GetMenuItemCount, GetMenuItemInfoW,
-        GetWindowTextW, GetWindowThreadProcessId, IsWindow, IsWindowVisible, PostMessageW,
-        SendMessageTimeoutW, HMENU, MENUITEMINFOW, MFS_CHECKED, MFS_DISABLED, MFT_SEPARATOR,
-        MIIM_FTYPE, MIIM_ID, MIIM_STATE, MIIM_STRING, MIIM_SUBMENU, SMTO_ABORTIFHUNG, WM_COMMAND,
-        WM_KEYDOWN, WM_NULL,
+        EnumChildWindows, EnumWindows, GetClassNameW, GetDlgCtrlID, GetMenu, GetMenuItemCount,
+        GetMenuItemInfoW, GetWindowTextW, GetWindowThreadProcessId, IsWindow, IsWindowVisible,
+        PostMessageW, SendMessageTimeoutW, HMENU, MENUITEMINFOW, MFS_CHECKED, MFS_DISABLED,
+        MFT_SEPARATOR, MIIM_FTYPE, MIIM_ID, MIIM_STATE, MIIM_STRING, MIIM_SUBMENU,
+        SMTO_ABORTIFHUNG, WM_COMMAND, WM_KEYDOWN, WM_NULL, WM_SETTEXT,
     };
 
     /// The visible top-level windows of process `pid`.
@@ -551,6 +554,103 @@ mod win {
             .map_err(|e| format!("UI Automation is not available: {e}"))
     }
 
+    /// The control id of a file dialog's file name box (`cmb13`, dlgs.h).
+    const FILE_NAME_BOX: i32 = 1148;
+    /// The control id of a dialog's default button (`IDOK`).
+    const IDOK: usize = 1;
+
+    /// The edit field of a file dialog's file name box, if `dialog` is a file dialog.
+    fn file_name_box(dialog: HWND) -> Option<HWND> {
+        unsafe extern "system" fn each(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
+            // SAFETY: `lparam` is the `Option<HWND>` passed below, alive for the enumeration.
+            let found = unsafe { &mut *(lparam.0 as *mut Option<HWND>) };
+            // SAFETY: `hwnd` comes from EnumChildWindows.
+            if class_name(hwnd) == "Edit" && unsafe { GetDlgCtrlID(hwnd) } == FILE_NAME_BOX {
+                *found = Some(hwnd);
+                return false.into();
+            }
+            true.into()
+        }
+        let mut found: Option<HWND> = None;
+        // SAFETY: the callback writes `found` only while EnumChildWindows runs.
+        let _ = unsafe {
+            EnumChildWindows(
+                Some(dialog),
+                Some(each),
+                LPARAM(&mut found as *mut _ as isize),
+            )
+        };
+        found
+    }
+
+    /// Picks `path` in the file dialog process `pid` has open (the one titled `title`, when
+    /// given), as typing it into the file name box and pressing the default button would: the
+    /// box's text set, and the `WM_COMMAND` of `IDOK` posted to the dialog. The dialog's title.
+    pub fn pick(pid: u32, path: &str, title: Option<&str>) -> Result<String, Refusal> {
+        let found: Vec<(HWND, HWND)> = windows_of(pid)
+            .into_iter()
+            .filter(|&h| class_name(h) == "#32770")
+            .filter(|&h| title.is_none_or(|t| window_text(h) == t))
+            .filter_map(|h| file_name_box(h).map(|edit| (h, edit)))
+            .collect();
+        let (dialog, edit) = match found[..] {
+            [one] => one,
+            [] => {
+                return Err(Refusal::Missing(match title {
+                    Some(t) => format!("the app has no file dialog titled \"{t}\" open"),
+                    None => "the app has no file dialog open".into(),
+                }))
+            }
+            _ => {
+                return Err(Refusal::Refused(
+                    "the app has more than one file dialog open; name one with --dialog".into(),
+                ))
+            }
+        };
+        let name = window_text(dialog);
+        let text: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut out = 0usize;
+        // SAFETY: `text` is NUL-terminated and outlives the call, which copies it.
+        let set = unsafe {
+            SendMessageTimeoutW(
+                edit,
+                WM_SETTEXT,
+                WPARAM(0),
+                LPARAM(text.as_ptr() as isize),
+                SMTO_ABORTIFHUNG,
+                2000,
+                Some(&mut out),
+            )
+        };
+        if set.0 == 0 || out == 0 {
+            return Err(Refusal::Refused(format!(
+                "could not type the path into \"{name}\""
+            )));
+        }
+        // SAFETY: posts to a live dialog of the app; nothing is borrowed.
+        unsafe {
+            PostMessageW(
+                Some(dialog),
+                WM_COMMAND,
+                WPARAM((BN_CLICKED << 16) | IDOK),
+                LPARAM(0),
+            )
+        }
+        .map_err(|e| Refusal::Refused(format!("could not press the dialog's button: {e}")))?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        // SAFETY: a plain query on a window handle.
+        while unsafe { IsWindow(Some(dialog)) }.as_bool() {
+            if std::time::Instant::now() >= deadline {
+                return Err(Refusal::Refused(format!(
+                    "\"{name}\" stayed open after `{path}` was picked: it may not accept it, \
+                     have gone into a folder, or show an error box of its own (see `native list`)"
+                )));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        Ok(name)
+    }
+
     /// The dialogs process `pid` has open, with their text and buttons.
     pub fn dialogs(pid: u32) -> Result<Vec<Dialog>, String> {
         let uia = automation()?;
@@ -592,6 +692,7 @@ mod win {
                 title: window_text(hwnd),
                 text,
                 buttons,
+                file: file_name_box(hwnd).is_some(),
                 hwnd: hwnd.0 as isize,
             });
         }

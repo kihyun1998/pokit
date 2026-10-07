@@ -209,6 +209,10 @@ impl State {
             #[cfg(windows)]
             Request::NativeDismiss => self.native_dismiss_cmd().await,
             #[cfg(windows)]
+            Request::NativePick { path, dialog } => {
+                self.native_pick_cmd(path, dialog.as_deref()).await
+            }
+            #[cfg(windows)]
             Request::NativeTray {
                 index,
                 right,
@@ -219,6 +223,7 @@ impl State {
             | Request::NativeChoose { .. }
             | Request::NativeAnswer { .. }
             | Request::NativeDismiss
+            | Request::NativePick { .. }
             | Request::NativeTray { .. } => Err(Failure::new(
                 Kind::Unsupported,
                 "native UI is not built on this platform yet",
@@ -891,7 +896,8 @@ impl State {
                     return Err(Failure::new(
                         Kind::Usage,
                         format!(
-                            "`{t}` is in another page than `{from}`; drop at a point                              (--to-x, --to-y) with --route os to cross into another window"
+                            "`{t}` is in another page than `{from}`; drop at a point \
+                             (--to-x, --to-y) with --route os to cross into another window"
                         ),
                     ));
                 }
