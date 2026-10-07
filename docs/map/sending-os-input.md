@@ -23,7 +23,7 @@ How `window activate` brings the launched app to the front, and how `key`, `type
   - Neither the release at the end nor the one-at-a-time lock has a test; both were read, not reddened.
 - **`wheel` turns the wheel over an element, a point, or the middle of the page, without scrolling anything into view.** It aims at the middle of the part of an element that is in view, refuses an element wholly out of view and a point outside the viewport (exit 5), because the wheel turns where the cursor is. On CDP one notch is a `mouseWheel` of 100 CSS pixels (`PIXELS_PER_NOTCH`), what one OS notch scrolled on this machine; on the OS it is one `MOUSEEVENTF_WHEEL` of 120 per notch, and how far that scrolls is Windows' and Chromium's business (the user's lines-per-notch setting, display scaling). The test checks that both routes scroll alike, not a number of pixels.
 - **`hold --compare` runs the same keys on CDP and then through the OS, each inside its own measurement,** and reports each route's latency (see [[measuring-the-page]]) and `os_minus_cdp`, the native layer's share, which also holds pokit's hand-off to a blocking thread for each OS key. It needs the app in front and refuses before either route runs.
-- **`capabilities` says, per input command, which routes exist, which is the default, and whether each takes focus** (#1 story 42). `window` takes focus.
+- **`capabilities` says, per input command, which routes exist, which is the default, and whether each takes focus** (#1 story 42). For `window` it says so per action: `activate` takes focus, `move` and `resize` do not ([[placing-windows]]).
 
 ## Measured
 

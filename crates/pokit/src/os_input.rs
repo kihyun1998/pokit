@@ -148,7 +148,10 @@ pub fn to_screen(origin: (i32, i32), css: (f64, f64), ratio: f64) -> (i32, i32) 
 }
 
 #[cfg(windows)]
-pub use win::{activate, click, is_frontmost, key, release, strokes, text, wheel};
+pub use win::{
+    activate, click, is_frontmost, key, release, render_widget, strokes, text, top_level_windows,
+    wheel,
+};
 
 #[cfg(windows)]
 mod win {
@@ -174,40 +177,44 @@ mod win {
         SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_RESTORE, WINDOWPLACEMENT,
     };
 
-    /// The app's main window: of its visible, unowned top-level windows, the largest in its
-    /// normal (not minimized) size.
-    fn app_window(pid: u32) -> Option<HWND> {
+    /// The visible top-level windows of process `pid`, owned ones included, in z-order.
+    pub fn top_level_windows(pid: u32) -> Vec<HWND> {
         unsafe extern "system" fn each(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
             // SAFETY: `lparam` is the `(pid, Vec)` passed below, alive for the enumeration.
-            let found = unsafe { &mut *(lparam.0 as *mut (u32, Vec<(HWND, i64)>)) };
+            let found = unsafe { &mut *(lparam.0 as *mut (u32, Vec<HWND>)) };
             let mut owner_pid = 0u32;
-            // SAFETY: `hwnd` comes from EnumWindows; every out-pointer is a valid local.
+            // SAFETY: `hwnd` comes from EnumWindows; `owner_pid` is a valid out-pointer.
             unsafe {
                 GetWindowThreadProcessId(hwnd, Some(&mut owner_pid));
-                if owner_pid == found.0
-                    && IsWindowVisible(hwnd).as_bool()
-                    && GetWindow(hwnd, GW_OWNER).is_err()
-                {
-                    let mut place = WINDOWPLACEMENT {
-                        length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
-                        ..Default::default()
-                    };
-                    let _ = GetWindowPlacement(hwnd, &mut place);
-                    let r = place.rcNormalPosition;
-                    let area = i64::from(r.right - r.left) * i64::from(r.bottom - r.top);
-                    found.1.push((hwnd, area));
+                if owner_pid == found.0 && IsWindowVisible(hwnd).as_bool() {
+                    found.1.push(hwnd);
                 }
             }
             true.into()
         }
-        let mut found: (u32, Vec<(HWND, i64)>) = (pid, Vec::new());
+        let mut found: (u32, Vec<HWND>) = (pid, Vec::new());
         // SAFETY: the callback reads `found` only while EnumWindows runs.
         let _ = unsafe { EnumWindows(Some(each), LPARAM(&mut found as *mut _ as isize)) };
-        found
-            .1
+        found.1
+    }
+
+    /// The app's main window: of its visible, unowned top-level windows, the largest in its
+    /// normal (not minimized) size.
+    fn app_window(pid: u32) -> Option<HWND> {
+        top_level_windows(pid)
             .into_iter()
-            .max_by_key(|(_, area)| *area)
-            .map(|(h, _)| h)
+            // SAFETY: a plain query on a window handle.
+            .filter(|&hwnd| unsafe { GetWindow(hwnd, GW_OWNER) }.is_err())
+            .max_by_key(|&hwnd| {
+                let mut place = WINDOWPLACEMENT {
+                    length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+                    ..Default::default()
+                };
+                // SAFETY: `hwnd` is a window handle; `place` is a valid out-pointer.
+                let _ = unsafe { GetWindowPlacement(hwnd, &mut place) };
+                let r = place.rcNormalPosition;
+                i64::from(r.right - r.left) * i64::from(r.bottom - r.top)
+            })
     }
 
     /// Whether the foreground window belongs to process `pid`.
@@ -395,7 +402,7 @@ mod win {
     }
 
     /// The WebView2 render widget inside `root`, which holds the page.
-    fn render_widget(root: HWND) -> Option<HWND> {
+    pub fn render_widget(root: HWND) -> Option<HWND> {
         unsafe extern "system" fn each(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
             // SAFETY: `lparam` is the `Option<HWND>` passed below, alive for the enumeration.
             let found = unsafe { &mut *(lparam.0 as *mut Option<HWND>) };

@@ -96,6 +96,17 @@ pub enum Request {
         secret: bool,
     },
     WindowActivate,
+    WindowMove {
+        x: f64,
+        y: f64,
+    },
+    WindowResize {
+        width: f64,
+        height: f64,
+        /// The size is the page's viewport in CSS pixels, not the window's.
+        #[serde(default)]
+        viewport: bool,
+    },
     NativeList,
     NativeChoose {
         path: String,
@@ -151,6 +162,8 @@ pub enum CommandKind {
     ClipboardRead,
     ClipboardWrite,
     WindowActivate,
+    WindowMove,
+    WindowResize,
     NativeList,
     NativeChoose,
     NativeAnswer,
@@ -196,6 +209,8 @@ impl Request {
             Request::ClipboardRead => CommandKind::ClipboardRead,
             Request::ClipboardWrite { .. } => CommandKind::ClipboardWrite,
             Request::WindowActivate => CommandKind::WindowActivate,
+            Request::WindowMove { .. } => CommandKind::WindowMove,
+            Request::WindowResize { .. } => CommandKind::WindowResize,
             Request::NativeList => CommandKind::NativeList,
             Request::NativeChoose { .. } => CommandKind::NativeChoose,
             Request::NativeAnswer { .. } => CommandKind::NativeAnswer,
@@ -271,6 +286,8 @@ impl CommandKind {
             CommandKind::ClipboardRead => "clipboard_read",
             CommandKind::ClipboardWrite => "clipboard_write",
             CommandKind::WindowActivate => "window_activate",
+            CommandKind::WindowMove => "window_move",
+            CommandKind::WindowResize => "window_resize",
             CommandKind::NativeList => "native_list",
             CommandKind::NativeChoose => "native_choose",
             CommandKind::NativeAnswer => "native_answer",
@@ -307,6 +324,8 @@ impl CommandKind {
             | CommandKind::ClipboardRead
             | CommandKind::ClipboardWrite
             | CommandKind::WindowActivate
+            | CommandKind::WindowMove
+            | CommandKind::WindowResize
             | CommandKind::NativeList
             | CommandKind::NativeChoose
             | CommandKind::NativeAnswer
@@ -339,6 +358,8 @@ impl CommandKind {
             | CommandKind::ClipboardRead
             | CommandKind::ClipboardWrite
             | CommandKind::WindowActivate
+            | CommandKind::WindowMove
+            | CommandKind::WindowResize
             | CommandKind::NativeList
             | CommandKind::NativeChoose
             | CommandKind::NativeAnswer
@@ -372,6 +393,8 @@ impl CommandKind {
             | CommandKind::ClipboardRead
             | CommandKind::ClipboardWrite
             | CommandKind::WindowActivate
+            | CommandKind::WindowMove
+            | CommandKind::WindowResize
             | CommandKind::NativeList
             | CommandKind::NativeChoose
             | CommandKind::NativeAnswer
@@ -458,6 +481,12 @@ mod tests {
                 secret: false,
             },
             Request::WindowActivate,
+            Request::WindowMove { x: 1.0, y: 2.0 },
+            Request::WindowResize {
+                width: 3.0,
+                height: 4.0,
+                viewport: true,
+            },
             Request::NativeList,
             Request::NativeChoose {
                 path: "File > Open".into(),
