@@ -245,3 +245,13 @@ pub fn can_take_foreground(test: &str) -> bool {
     }
     can
 }
+
+/// The system's double-click time: clicks closer together than this are one sequence.
+pub fn double_click_time() -> std::time::Duration {
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetDoubleClickTime() -> u32;
+    }
+    // SAFETY: takes no arguments.
+    std::time::Duration::from_millis(u64::from(unsafe { GetDoubleClickTime() }))
+}

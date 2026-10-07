@@ -31,10 +31,11 @@ fn clear_events(p: &Pokit) {
 fn os_input_to_an_app_not_in_front_is_refused_and_sends_nothing() {
     let p = Pokit::launch_fixture("os-guard");
     clear_events(&p);
+    assert_eq!(p.run(&["eval", "window.scrollTo(0, 0); true"]).code, 0);
     for args in [
         &["key", "KeyA", "--into", "#name", "--route", "os"][..],
         &["type", "abc", "--into", "#name", "--route", "os"][..],
-        &["click", "#target", "--route", "os"][..],
+        &["click", "#show-later", "--route", "os"][..],
     ] {
         let r = p.run(args);
         assert_eq!(r.code, 6, "{args:?}: {}", r.out);
@@ -52,6 +53,11 @@ fn os_input_to_an_app_not_in_front_is_refused_and_sends_nothing() {
         "refused OS input reached the page"
     );
     assert_eq!(p.read_text("#last-mouse"), "");
+    assert_eq!(
+        p.run(&["eval", "window.scrollY"]).out["value"],
+        0,
+        "a refused OS click scrolled the page"
+    );
 }
 
 /// One test, because each case brings its own fixture to the front.
@@ -85,7 +91,8 @@ fn os_input_reaches_the_page_as_a_hand_would_send_it() {
         .filter(|t| t.starts_with("fixture-accelerator:"))
         .collect();
     assert!(
-        accelerators.iter().any(|t| t.contains("vk=75")),
+        accelerators.iter().any(|t| t.contains("vk=75"))
+            && accelerators.iter().any(|t| t.contains("vk=17")),
         "OS input did not raise WebView2's AcceleratorKeyPressed: {accelerators:?}"
     );
     let seen = accelerators.len();
@@ -123,13 +130,55 @@ fn os_input_reaches_the_page_as_a_hand_would_send_it() {
     );
     // Clicks closer together than the system's double-click time count as one sequence, as a
     // hand's would; the single click above would make this a triple.
-    std::thread::sleep(std::time::Duration::from_millis(700));
+    std::thread::sleep(window::double_click_time() + std::time::Duration::from_millis(200));
     let r = p.run(&["click", "#target", "--route", "os", "--double"]);
     assert_eq!(r.code, 0, "{}", r.out);
     assert!(eventually(2000, || p.read_text("#last-mouse") == "dblclick"));
     let r = p.run(&["click", "#target", "--route", "os", "--right"]);
     assert_eq!(r.code, 0, "{}", r.out);
     assert!(eventually(2000, || p.read_text("#last-mouse") == "contextmenu"));
+
+    // With another of the app's windows in front, the main page would not get the input.
+    assert_eq!(p.run(&["click", "#open-second"]).code, 0);
+    assert!(eventually(5000, || p
+        .run(&["targets", "--select", "second"])
+        .code
+        == 0));
+    assert_eq!(p.run(&["targets", "--select", "0"]).code, 0);
+    assert_eq!(p.run(&["window", "activate"]).code, 0);
+    let r = p.run(&["targets", "--select", "second"]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    let in_second = p.run(&["eval", "document.hasFocus()"]).out["value"] == true;
+    assert_eq!(p.run(&["targets", "--select", "0"]).code, 0);
+    if in_second {
+        clear_events(&p);
+        let r = p.run(&["key", "KeyA", "--route", "os"]);
+        assert_eq!(
+            r.code, 6,
+            "OS input went ahead with another window in front: {}",
+            r.out
+        );
+        assert!(
+            events(&p, "key").is_empty(),
+            "the main page got keys meant for no one"
+        );
+    } else {
+        eprintln!("the second window did not come to the front; that case was not tried");
+    }
+
+    // With the app's own dialog in front, the input would go to the dialog.
+    assert_eq!(p.run(&["native", "choose", "Help > Ask"]).code, 0);
+    assert!(eventually(5000, || {
+        p.run(&["native", "list"]).out["dialogs"]
+            .as_array()
+            .is_some_and(|d| !d.is_empty())
+    }));
+    let r = p.run(&["click", "#target", "--route", "os"]);
+    assert_eq!(
+        r.code, 6,
+        "an OS click went ahead with a dialog in front: {}",
+        r.out
+    );
 }
 
 #[test]

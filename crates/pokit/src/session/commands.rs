@@ -501,6 +501,10 @@ impl State {
         how: ClickHow,
         require_focus: Option<&str>,
     ) -> Outcome {
+        #[cfg(windows)]
+        if how.route == Route::Os {
+            self.refuse_unless_front().await?;
+        }
         let (cdp, x, y) = match at {
             Some(ClickAt::Element(t)) => {
                 let (tid, cdp, obj) = self.resolve(t).await?;
