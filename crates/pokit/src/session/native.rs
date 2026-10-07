@@ -46,10 +46,11 @@ impl State {
 
     pub(super) async fn native_list_cmd(&self) -> Outcome {
         let pid = self.native_pid()?;
-        let (menus, context, dialogs) = blocking(move || {
+        let (menus, context, tray, dialogs) = blocking(move || {
             let menus = crate::native::menus(pid);
             let context = crate::native::context_menu(pid);
-            crate::native::dialogs(pid).map(|d| (menus, context, d))
+            let tray = crate::native::tray_icons(pid);
+            crate::native::dialogs(pid).map(|d| (menus, context, tray, d))
         })
         .await?;
         let mut text = String::new();
@@ -77,6 +78,7 @@ impl State {
         Ok(fields! {
             "windows" => windows,
             "context_menu" => context,
+            "tray_icons" => tray,
             "dialogs" => dialogs,
             "text" => text,
         })
@@ -104,10 +106,9 @@ impl State {
     }
 
     /// The window to give the foreground back to after a context menu: the one in front now, or,
-    /// when the app is, the one in front at the click that opened the menu, which is forgotten
-    /// here.
+    /// when the app is, the one in front at the click that opened the menu.
     fn foreground_before_menu(&self, pid: u32) -> (isize, u32) {
-        let at_click = self.foreground_at_click.lock().unwrap().take();
+        let at_click = *self.foreground_at_click.lock().unwrap();
         let now = crate::proc::foreground();
         if now.1 == pid {
             at_click.unwrap_or(now)
@@ -144,9 +145,11 @@ impl State {
             .map_err(|e| Failure::new(Kind::Error, format!("the native UI call failed: {e}")))?;
         match keeping {
             Some(k) => *k.lock().unwrap() = Instant::now() + NATIVE_FOCUS_GRACE,
-            None => {
+            None if chosen.is_ok() => {
+                *self.foreground_at_click.lock().unwrap() = None;
                 self.keep_foreground_after(pid, before, "after a context menu choice");
             }
+            None => {}
         }
         let window = chosen.map_err(|e| match e {
             crate::native::Refusal::Missing(m) => Failure::new(Kind::NotFound, m),
@@ -161,6 +164,36 @@ impl State {
         Ok(f)
     }
 
+    /// `native tray`: clicks the app's tray icon. The window in front is kept for giving the
+    /// foreground back after the menu a right click opens.
+    pub(super) async fn native_tray_cmd(
+        self: &Arc<Self>,
+        index: usize,
+        right: bool,
+        double: bool,
+    ) -> Outcome {
+        let pid = self.native_pid()?;
+        let front = crate::proc::foreground();
+        if front.0 != 0 && front.1 != pid {
+            *self.foreground_at_click.lock().unwrap() = Some(front);
+        }
+        let clicked = tokio::task::spawn_blocking(move || {
+            crate::native::click_tray(pid, index, right, double)
+        })
+        .await
+        .map_err(|e| Failure::new(Kind::Error, format!("the native UI call failed: {e}")))?;
+        clicked.map_err(|e| match e {
+            crate::native::Refusal::Missing(m) => Failure::new(Kind::NotFound, m),
+            crate::native::Refusal::Refused(m) => Failure::new(Kind::Error, m),
+        })?;
+        let click = match (right, double) {
+            (true, _) => "right",
+            (_, true) => "double",
+            _ => "left",
+        };
+        Ok(fields! { "tray_icon" => index, "click" => click })
+    }
+
     /// `native dismiss`: closes the open context menu, and gives the foreground back.
     pub(super) async fn native_dismiss_cmd(self: &Arc<Self>) -> Outcome {
         let pid = self.native_pid()?;
@@ -168,7 +201,10 @@ impl State {
         let closed = tokio::task::spawn_blocking(move || crate::native::dismiss(pid))
             .await
             .map_err(|e| Failure::new(Kind::Error, format!("the native UI call failed: {e}")))?;
-        self.keep_foreground_after(pid, before, "after a context menu closed");
+        if closed.is_ok() {
+            *self.foreground_at_click.lock().unwrap() = None;
+            self.keep_foreground_after(pid, before, "after a context menu closed");
+        }
         let levels = closed.map_err(|e| match e {
             crate::native::Refusal::Missing(m) => Failure::new(Kind::NotFound, m),
             crate::native::Refusal::Refused(m) => Failure::new(Kind::Error, m),

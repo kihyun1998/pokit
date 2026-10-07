@@ -1,5 +1,6 @@
 //! An app's native UI on Windows: its menu bars and open context menus, read and chosen through
-//! Win32, and its dialogs, read and answered through UI Automation.
+//! Win32, its tray icons, clicked through Win32, and its dialogs, read and answered through UI
+//! Automation.
 
 #![cfg_attr(not(windows), allow(dead_code))]
 
@@ -123,7 +124,10 @@ pub enum Refusal {
 }
 
 #[cfg(windows)]
-pub use win::{answer, choose, context_menu, context_menu_open, dialogs, dismiss, menus};
+pub use win::{
+    answer, choose, click_tray, context_menu, context_menu_open, dialogs, dismiss, menus,
+    tray_icons,
+};
 
 #[cfg(windows)]
 mod win {
@@ -150,14 +154,22 @@ mod win {
 
     /// The visible top-level windows of process `pid`.
     fn windows_of(pid: u32) -> Vec<HWND> {
+        all_windows_of(pid)
+            .into_iter()
+            // SAFETY: a plain query on a window handle.
+            .filter(|&h| unsafe { IsWindowVisible(h) }.as_bool())
+            .collect()
+    }
+
+    /// The top-level windows of process `pid`, hidden ones included.
+    fn all_windows_of(pid: u32) -> Vec<HWND> {
         unsafe extern "system" fn each(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
             // SAFETY: `lparam` is the `(pid, Vec)` passed below, alive for the enumeration.
             let found = unsafe { &mut *(lparam.0 as *mut (u32, Vec<HWND>)) };
             let mut owner = 0u32;
             // SAFETY: `hwnd` comes from EnumWindows; `owner` is a valid out-pointer.
             unsafe { GetWindowThreadProcessId(hwnd, Some(&mut owner)) };
-            // SAFETY: as above.
-            if owner == found.0 && unsafe { IsWindowVisible(hwnd) }.as_bool() {
+            if owner == found.0 {
                 found.1.push(hwnd);
             }
             true.into()
@@ -395,6 +407,57 @@ mod win {
             ));
         }
         Ok("context menu".into())
+    }
+
+    /// The hidden window tray-icon, the crate behind Tauri's tray, creates for each tray icon.
+    const TRAY_CLASS: &str = "tray_icon_app";
+    /// The message the shell sends that window for a mouse event on its icon, with the mouse
+    /// message as `lparam` (tray-icon's `WM_USER_TRAYICON`).
+    const TRAY_CALLBACK: u32 = 6002;
+    const WM_LBUTTONDOWN: usize = 0x0201;
+    const WM_LBUTTONUP: usize = 0x0202;
+    const WM_LBUTTONDBLCLK: usize = 0x0203;
+    const WM_RBUTTONDOWN: usize = 0x0204;
+    const WM_RBUTTONUP: usize = 0x0205;
+
+    fn tray_windows(pid: u32) -> Vec<HWND> {
+        all_windows_of(pid)
+            .into_iter()
+            .filter(|&h| class_name(h) == TRAY_CLASS)
+            .collect()
+    }
+
+    /// How many tray icons process `pid` has, made with tray-icon.
+    pub fn tray_icons(pid: u32) -> usize {
+        tray_windows(pid).len()
+    }
+
+    /// Clicks tray icon `index` (from 0, in the order Windows lists their windows now) of process
+    /// `pid` as the shell does when the mouse is clicked on it: the mouse messages, sent to the
+    /// icon's window. The taskbar itself is not touched.
+    pub fn click_tray(pid: u32, index: usize, right: bool, double: bool) -> Result<(), Refusal> {
+        let icons = tray_windows(pid);
+        let hwnd = *icons.get(index).ok_or_else(|| {
+            Refusal::Missing(match icons.len() {
+                0 => "the app has no tray icon made with tray-icon (Tauri's tray)".into(),
+                n => format!("the app has {n} tray icons; --index {index} is not one of them"),
+            })
+        })?;
+        let (down, up) = if right {
+            (WM_RBUTTONDOWN, WM_RBUTTONUP)
+        } else {
+            (WM_LBUTTONDOWN, WM_LBUTTONUP)
+        };
+        let mut events = vec![down, up];
+        if double && !right {
+            events.extend([WM_LBUTTONDBLCLK, WM_LBUTTONUP]);
+        }
+        for event in events {
+            // SAFETY: posts to a window of the app; nothing is borrowed.
+            unsafe { PostMessageW(Some(hwnd), TRAY_CALLBACK, WPARAM(0), LPARAM(event as isize)) }
+                .map_err(|e| Refusal::Refused(format!("could not click the tray icon: {e}")))?;
+        }
+        Ok(())
     }
 
     /// Whether process `pid` has a context menu open.

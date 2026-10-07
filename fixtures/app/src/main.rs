@@ -40,6 +40,37 @@ async fn open_dropped(app: tauri::AppHandle, x: f64, y: f64) -> Result<(), Strin
         .map_err(|e| e.to_string())
 }
 
+/// The fixture's tray icon with `--tray`, "pokit fixture tray": a left click shows it on the page, and its
+/// menu, on a right click, has Note from the tray and a disabled entry.
+fn tray(app: &tauri::App) -> tauri::Result<()> {
+    use tauri::menu::{MenuBuilder, MenuItemBuilder};
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+    let note = MenuItemBuilder::with_id("tray-note", "&Note from the tray").build(app)?;
+    let off = MenuItemBuilder::with_id("tray-off", "Not here")
+        .enabled(false)
+        .build(app)?;
+    let menu = MenuBuilder::new(app).items(&[&note, &off]).build()?;
+    let mut builder = TrayIconBuilder::with_id("fixture-tray")
+        .tooltip("pokit fixture tray")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_native_result(tray.app_handle(), "the tray icon was clicked");
+            }
+        });
+    if let Some(icon) = app.default_window_icon() {
+        builder = builder.icon(icon.clone());
+    }
+    builder.build(app)?;
+    Ok(())
+}
+
 /// Pops up the page's context menu at the cursor: Mark here, a disabled entry, and a submenu
 /// with Deeper.
 #[tauri::command]
@@ -193,6 +224,9 @@ fn main() {
             if let Some(window) = app.get_webview_window("main") {
                 log_accelerator_keys(&window);
             }
+            if std::env::args().any(|a| a == "--tray") {
+                tray(app)?;
+            }
             let menu = native_menu(app)?;
             if let Some(window) = app.get_webview_window("main") {
                 window.set_menu(menu)?;
@@ -201,6 +235,7 @@ fn main() {
                 "hello" => show_native_result(app, "hello from the menu"),
                 "ask" => ask_in_a_dialog(app.clone()),
                 "ctx-mark" => show_native_result(app, "marked from the context menu"),
+                "tray-note" => show_native_result(app, "noted from the tray"),
                 "ctx-deeper" => show_native_result(app, "deeper from the context menu"),
                 _ => {}
             });
