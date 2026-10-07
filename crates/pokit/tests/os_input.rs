@@ -224,7 +224,15 @@ fn capabilities_say_which_routes_take_focus() {
     }
     assert_eq!(c["type"]["routes"]["cdp"]["ime_composition"], true, "{c}");
     assert_eq!(c["type"]["routes"]["os"]["ime_composition"], false, "{c}");
-    assert_eq!(c["window"]["takes_focus"], true, "{c}");
+    assert_eq!(
+        c["window"]["actions"]["activate"]["takes_focus"], true,
+        "{c}"
+    );
+    assert_eq!(c["window"]["actions"]["move"]["takes_focus"], false, "{c}");
+    assert_eq!(
+        c["window"]["actions"]["resize"]["takes_focus"], false,
+        "{c}"
+    );
 }
 
 /// The scroller's position after `wheel` on `route`, from the top.

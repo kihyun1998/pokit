@@ -149,3 +149,103 @@ pub(super) async fn blocking<T: Send + 'static>(
         .map_err(|e| Failure::new(Kind::Error, format!("the native UI call failed: {e}")))?
         .map_err(Failure::from)
 }
+
+/// How long `window move` and `window resize` wait for the page to follow its window.
+const PLACE_SETTLE: Duration = Duration::from_secs(3);
+
+impl State {
+    /// Where the current page is on the screen and how big, as it reports itself.
+    async fn page_box(&self, cdp: &crate::cdp::Cdp) -> Result<crate::window::PageBox, Failure> {
+        let v = super::commands::evaluate(
+            cdp,
+            "[screenX, screenY, innerWidth, innerHeight, devicePixelRatio]",
+        )
+        .await?;
+        let n = |i: usize| {
+            v[i].as_f64().ok_or_else(|| {
+                Failure::new(
+                    Kind::Error,
+                    format!("the page reported no place or size: {v}"),
+                )
+            })
+        };
+        Ok(crate::window::PageBox {
+            x: n(0)?,
+            y: n(1)?,
+            width: n(2)?,
+            height: n(3)?,
+            ratio: n(4)?,
+        })
+    }
+
+    /// The app's window that holds the current page.
+    async fn page_window(&self, pid: u32, page: crate::window::PageBox) -> Result<isize, Failure> {
+        use crate::window::Unplaced;
+        tokio::task::spawn_blocking(move || crate::window::page_window(pid, page))
+            .await
+            .map_err(|e| Failure::new(Kind::Error, format!("the window call failed: {e}")))?
+            .map_err(|e| match e {
+                Unplaced::Minimized => Failure::new(
+                    Kind::Error,
+                    "no visible window of the app holds this page, and one of its windows is \
+                     minimized; restore it first",
+                ),
+                Unplaced::NotFound(m) => Failure::new(Kind::NotFound, m),
+            })
+    }
+
+    /// `window move` / `window resize`: the window holding the current page, placed without
+    /// activating it, once the page has followed. With `viewport`, `size` is the page's.
+    pub(super) async fn window_place_cmd(
+        &self,
+        at: Option<(f64, f64)>,
+        size: Option<(f64, f64)>,
+        viewport: bool,
+    ) -> Outcome {
+        let pid = self.app_pid.ok_or_else(|| {
+            Failure::new(
+                Kind::Unsupported,
+                "window needs the app's process, which only a launched session knows",
+            )
+        })?;
+        let (tid, cdp) = self.current()?;
+        self.ensure_ready(&tid, &cdp).await?;
+        let page = self.page_box(&cdp).await?;
+        let hwnd = self.page_window(pid, page).await?;
+        let size = match (size, viewport) {
+            (Some(want), true) => {
+                let placed = blocking(move || crate::window::placed(hwnd)).await?;
+                let area = crate::window::area(hwnd)
+                    .ok_or_else(|| Failure::new(Kind::Error, "the window holds no page now"))?;
+                Some(crate::window::outer_for_viewport(
+                    want, page.ratio, placed, area,
+                ))
+            }
+            (size, _) => size,
+        };
+        blocking(move || crate::window::set(hwnd, at, size)).await?;
+        let deadline = Instant::now() + PLACE_SETTLE;
+        let page = loop {
+            let page = self.page_box(&cdp).await?;
+            let followed = crate::window::area(hwnd)
+                .is_some_and(|a| crate::window::matching(page, &[a]).is_ok());
+            if followed {
+                break page;
+            }
+            if Instant::now() >= deadline {
+                return Err(Failure::new(
+                    Kind::Timeout,
+                    "the window was placed, but the page did not follow it within 3 s",
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        let placed = blocking(move || crate::window::placed(hwnd)).await?;
+        Ok(fields! {
+            "rect" => json!({ "x": placed.x, "y": placed.y, "width": placed.width, "height": placed.height }),
+            "scale" => placed.scale,
+            "viewport" => json!({ "width": page.width, "height": page.height }),
+            "device_pixel_ratio" => page.ratio,
+        })
+    }
+}

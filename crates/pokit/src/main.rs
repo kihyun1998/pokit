@@ -22,6 +22,8 @@ mod session;
 mod snapshot;
 mod support;
 mod trace;
+#[cfg(windows)]
+mod window;
 
 use clap::{Parser, Subcommand};
 use home::{Mode, Status};
@@ -78,6 +80,25 @@ enum MeasureAction {
 enum WindowAction {
     /// Bring the app's main window to the front, taking the user's focus: OS input needs it.
     Activate,
+    /// Move the window holding the current page, in the window's logical pixels, without
+    /// bringing it to the front.
+    Move {
+        #[arg(long, allow_hyphen_values = true, value_parser = finite)]
+        x: f64,
+        #[arg(long, allow_hyphen_values = true, value_parser = finite)]
+        y: f64,
+    },
+    /// Resize the window holding the current page, outer size in the window's logical pixels,
+    /// without bringing it to the front; reports the page's new viewport.
+    Resize {
+        #[arg(long, value_parser = positive)]
+        width: f64,
+        #[arg(long, value_parser = positive)]
+        height: f64,
+        /// Size the page's viewport to `--width` x `--height` CSS pixels instead of the window.
+        #[arg(long)]
+        viewport: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -269,7 +290,8 @@ enum Command {
         #[command(subcommand)]
         action: MeasureAction,
     },
-    /// Operate the launched app's main window.
+    /// Bring the launched app to the front, or move and resize the window holding the current
+    /// page.
     Window {
         #[command(subcommand)]
         action: WindowAction,
@@ -563,6 +585,21 @@ fn dispatch(cli: Cli) -> (String, i32, Value) {
         Command::Window {
             action: WindowAction::Activate,
         } => Request::WindowActivate,
+        Command::Window {
+            action: WindowAction::Move { x, y },
+        } => Request::WindowMove { x, y },
+        Command::Window {
+            action:
+                WindowAction::Resize {
+                    width,
+                    height,
+                    viewport,
+                },
+        } => Request::WindowResize {
+            width,
+            height,
+            viewport,
+        },
         Command::Native {
             action: NativeAction::List,
         } => Request::NativeList,
@@ -769,7 +806,11 @@ fn capabilities() -> output::Fields {
         let support = match sub.get_name() {
             "capabilities" => json!({ "supported": true }),
             "window" if support::answers("window") => {
-                json!({ "supported": true, "takes_focus": true })
+                json!({ "supported": true, "actions": {
+                    "activate": { "takes_focus": true },
+                    "move": { "takes_focus": false },
+                    "resize": { "takes_focus": false },
+                } })
             }
             name if support::answers(name) => match support::routes(name) {
                 Some(routes) => json!({ "supported": true, "routes": routes }),
@@ -817,6 +858,25 @@ fn secret_text(
                 format!("{name} needs text, --secret or --secret-env"),
             )),
         )
+    })
+}
+
+/// A finite number.
+fn finite(s: &str) -> Result<f64, String> {
+    match s.parse::<f64>() {
+        Ok(v) if v.is_finite() => Ok(v),
+        _ => Err(format!("`{s}` is not a finite number")),
+    }
+}
+
+/// A finite number above 0.
+fn positive(s: &str) -> Result<f64, String> {
+    finite(s).and_then(|v| {
+        if v > 0.0 {
+            Ok(v)
+        } else {
+            Err(format!("`{s}` is not above 0"))
+        }
     })
 }
 

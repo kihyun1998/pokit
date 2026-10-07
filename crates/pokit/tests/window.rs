@@ -182,3 +182,158 @@ fn a_hidden_webview_is_reported_and_its_gap_is_not_a_frame() {
         "a {longest} ms frame: the gap across the hidden period was read as a frame: {m}"
     );
 }
+
+/// Where the current page is on the screen and how big, in CSS pixels, as it reports itself.
+fn page_box(p: &Pokit) -> (f64, f64, f64, f64) {
+    let r = p.run(&["eval", "[screenX, screenY, innerWidth, innerHeight]"]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    let v: Vec<f64> = (0..4)
+        .map(|i| r.out["value"][i].as_f64().unwrap())
+        .collect();
+    (v[0], v[1], v[2], v[3])
+}
+
+fn near(a: f64, b: f64) -> bool {
+    (a - b).abs() <= 1.0
+}
+
+#[test]
+fn window_move_and_resize_reshape_the_page_without_taking_the_foreground() {
+    let p = Pokit::launch_fixture("window-shape");
+    let main = fixture_window(&p);
+    let before = window::foreground();
+
+    let a = p.run(&["window", "resize", "--width", "700", "--height", "500"]);
+    assert_eq!(a.code, 0, "{}", a.out);
+    let (_, _, w1, h1) = page_box(&p);
+    assert_eq!(
+        a.out["viewport"],
+        serde_json::json!({ "width": w1, "height": h1 })
+    );
+    let b = p.run(&["window", "resize", "--width", "600", "--height", "450"]);
+    assert_eq!(b.code, 0, "{}", b.out);
+    let (_, _, w2, h2) = page_box(&p);
+    assert!(
+        near(w1 - w2, 100.0) && near(h1 - h2, 50.0),
+        "the page did not shrink by what the window did: {w1}x{h1} -> {w2}x{h2}"
+    );
+    assert!(
+        near(b.out["rect"]["width"].as_f64().unwrap(), 600.0),
+        "{}",
+        b.out
+    );
+    assert_eq!(
+        b.out["viewport"],
+        serde_json::json!({ "width": w2, "height": h2 })
+    );
+
+    let c = p.run(&["window", "move", "--x", "200", "--y", "150"]);
+    assert_eq!(c.code, 0, "{}", c.out);
+    let (x1, y1, _, _) = page_box(&p);
+    let d = p.run(&["window", "move", "--x", "260", "--y", "190"]);
+    assert_eq!(d.code, 0, "{}", d.out);
+    let (x2, y2, w3, h3) = page_box(&p);
+    assert!(
+        near(x2 - x1, 60.0) && near(y2 - y1, 40.0),
+        "the page did not move by what the window did: ({x1}, {y1}) -> ({x2}, {y2})"
+    );
+    assert_eq!((w3, h3), (w2, h2), "moving the window resized the page");
+    assert!(
+        near(d.out["rect"]["x"].as_f64().unwrap(), 260.0),
+        "{}",
+        d.out
+    );
+
+    let v = p.run(&[
+        "window",
+        "resize",
+        "--width",
+        "640",
+        "--height",
+        "400",
+        "--viewport",
+    ]);
+    assert_eq!(v.code, 0, "{}", v.out);
+    let (_, _, vw, vh) = page_box(&p);
+    assert!(
+        near(vw, 640.0) && near(vh, 400.0),
+        "--viewport did not size the page: {vw}x{vh}"
+    );
+    let w2 = vw;
+    for bad in [["--width", "NaN"], ["--width", "0"]] {
+        let r = p.run(&["window", "resize", bad[0], bad[1], "--height", "300"]);
+        assert_eq!(r.code, 2, "{bad:?}: {}", r.out);
+    }
+    let r = p.run(&["window", "move", "--x", "inf", "--y", "0"]);
+    assert_eq!(r.code, 2, "{}", r.out);
+
+    if before != main {
+        assert_eq!(
+            window::foreground(),
+            before,
+            "moving or resizing took the foreground"
+        );
+    }
+
+    assert_eq!(p.run(&["click", "#open-second"]).code, 0);
+    assert!(eventually(5000, || p.run(&["targets"]).out["targets"]
+        .as_array()
+        .is_some_and(|t| t.len() == 2)));
+    assert_eq!(p.run(&["targets", "--select", "1"]).code, 0);
+    let (_, _, sw, _) = page_box(&p);
+    let e = p.run(&["window", "resize", "--width", "500", "--height", "400"]);
+    assert_eq!(e.code, 0, "{}", e.out);
+    let (_, _, sw2, _) = page_box(&p);
+    assert!(
+        !near(sw, sw2),
+        "the second window was not resized: {sw} -> {sw2}"
+    );
+    assert_eq!(p.run(&["targets", "--select", "0"]).code, 0);
+    assert_eq!(
+        page_box(&p).2,
+        w2,
+        "resizing the second window resized the main one"
+    );
+    let second = window::windows_of(p.app_pid())
+        .into_iter()
+        .find(|&h| window::title(h) == "pokit fixture - second")
+        .expect("the second window");
+    let above = |upper: isize, lower: isize| {
+        let order = window::windows_of(p.app_pid());
+        let at = |h| order.iter().position(|&o| o == h).unwrap();
+        at(upper) < at(lower)
+    };
+    assert!(above(second, main), "the second window did not open on top");
+    let g = p.run(&[
+        "window",
+        "resize",
+        "--width",
+        "700",
+        "--height",
+        "500",
+        "--viewport",
+    ]);
+    assert_eq!(g.code, 0, "{}", g.out);
+    assert!(
+        near(page_box(&p).2 - w2, 60.0),
+        "with the second window on top, the main page's window was not the one resized: {}",
+        g.out
+    );
+    assert!(
+        above(second, main),
+        "resizing the main window brought it above the second"
+    );
+
+    window::minimize(main);
+    let f = p.run(&["window", "move", "--x", "100", "--y", "100"]);
+    window::restore(main);
+    assert_eq!(f.code, 1, "a minimized window was moved: {}", f.out);
+    assert!(
+        f.out["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("minimized"),
+        "{}",
+        f.out
+    );
+}

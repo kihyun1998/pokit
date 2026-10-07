@@ -159,6 +159,24 @@ impl State {
             }
             #[cfg(windows)]
             Request::WindowActivate => self.window_activate_cmd().await,
+            #[cfg(windows)]
+            Request::WindowMove { x, y } => {
+                self.window_place_cmd(Some((*x, *y)), None, false).await
+            }
+            #[cfg(windows)]
+            Request::WindowResize {
+                width,
+                height,
+                viewport,
+            } => {
+                self.window_place_cmd(None, Some((*width, *height)), *viewport)
+                    .await
+            }
+            #[cfg(not(windows))]
+            Request::WindowMove { .. } | Request::WindowResize { .. } => Err(Failure::new(
+                Kind::Unsupported,
+                "moving and resizing windows is not built on this platform yet",
+            )),
             #[cfg(not(windows))]
             Request::WindowActivate => Err(Failure::new(
                 Kind::Unsupported,
