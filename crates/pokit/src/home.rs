@@ -108,14 +108,39 @@ pub fn stamp() -> String {
     format!("{y:04}{mo:02}{d:02}-{h:02}{m:02}{s:02}")
 }
 
-/// 128 random bits as hex, from the standard library's OS-seeded hasher keys.
+/// 128 bits from the OS random source, as 32 lowercase hex digits.
 pub fn token() -> String {
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
-    let part = || {
-        let mut h = RandomState::new().build_hasher();
-        h.write_u64(std::process::id() as u64);
-        h.finish()
-    };
-    format!("{:016x}{:016x}", part(), part())
+    let mut b = [0u8; 16];
+    getrandom::getrandom(&mut b).expect("the OS random source");
+    hex(&b)
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hex_writes_two_lowercase_digits_per_byte_leading_zeros_kept() {
+        let mut b = [0u8; 16];
+        b[0] = 0x0a;
+        b[15] = 0xff;
+        assert_eq!(hex(&b), "0a0000000000000000000000000000ff");
+    }
+
+    #[test]
+    fn a_token_is_32_lowercase_hex_digits_and_differs_each_call() {
+        let (a, b) = (token(), token());
+        for t in [&a, &b] {
+            assert_eq!(t.len(), 32, "{t}");
+            assert!(
+                t.bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f')),
+                "{t}"
+            );
+        }
+        assert_ne!(a, b);
+    }
 }
