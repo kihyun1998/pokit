@@ -61,6 +61,11 @@ fn a_stalling_page_is_measured_as_stalling_while_hold_keeps_its_own_pace() {
 
     assert_eq!(m["keys"]["handled"], 20, "{m}");
     assert_eq!(m["keys"]["repeats"], 19, "{m}");
+    assert_eq!(
+        m["latency"]["keys"], 20,
+        "every key is paired with its send: {m}"
+    );
+    assert!(m["latency"]["p50_ms"].as_f64().unwrap() >= 0.0, "{m}");
     let span = f(&m["keys"]["handled_span_ms"]);
     assert!(
         (20.0 * 60.0..20.0 * 60.0 * 1.5).contains(&span),
@@ -201,4 +206,17 @@ fn closing_an_attached_session_without_stop_leaves_no_probe() {
         "the probes outlived the session: {}",
         r.out
     );
+}
+
+#[test]
+fn a_held_chord_counts_its_key_not_its_modifiers() {
+    let p = Pokit::launch_fixture("measure-modifiers");
+    assert_eq!(p.run(&["measure", "start"]).code, 0);
+    let r = p.run(&["hold", "Ctrl+KeyB", "--count", "5", "--into", "#stall"]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    let m = p.run(&["measure", "stop", "--quiet", "300"]);
+    assert_eq!(m.code, 0, "{}", m.out);
+    assert_eq!(m.out["keys"]["handled"], 5, "{}", m.out);
+    assert_eq!(m.out["latency"]["keys"], 5, "{}", m.out);
+    assert_eq!(m.out["latency"]["unpaired_keys"], 0, "{}", m.out);
 }

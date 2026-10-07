@@ -148,7 +148,7 @@ pub fn to_screen(origin: (i32, i32), css: (f64, f64), ratio: f64) -> (i32, i32) 
 }
 
 #[cfg(windows)]
-pub use win::{activate, click, is_frontmost, key, text};
+pub use win::{activate, click, is_frontmost, key, release, strokes, text, wheel};
 
 #[cfg(windows)]
 mod win {
@@ -163,8 +163,8 @@ mod win {
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS,
         KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, KEYEVENTF_UNICODE,
         MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE,
-        MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT,
-        MOUSE_EVENT_FLAGS, VIRTUAL_KEY,
+        MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL,
+        MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         BringWindowToTop, EnumChildWindows, EnumWindows, GetAncestor, GetClassNameW,
@@ -305,6 +305,34 @@ mod win {
         Ok(keyboard(0, scan, flags))
     }
 
+    /// Sends physical key strokes, (code, key up), in one `SendInput` call, once the app is in front.
+    pub fn strokes(pid: u32, keys: &[(String, bool)]) -> Result<(), OsError> {
+        front_window(pid)?;
+        let inputs = keys
+            .iter()
+            .map(|(c, up)| physical_key(c, *up))
+            .collect::<Result<Vec<_>, _>>()?;
+        let sent = send(&inputs);
+        if sent == inputs.len() {
+            Ok(())
+        } else {
+            Err(OsError::Failed(format!(
+                "Windows took {sent} of {} key events (an elevated window may be in front)",
+                inputs.len()
+            )))
+        }
+    }
+
+    /// Releases keys pokit pressed, whichever app is in front now: a key left down would stay down
+    /// for the user.
+    pub fn release(codes: &[String]) {
+        let inputs: Vec<INPUT> = codes
+            .iter()
+            .filter_map(|c| physical_key(c, true).ok())
+            .collect();
+        send(&inputs);
+    }
+
     /// Presses a chord as a hand would, by physical key (its scan code on a US keyboard), so the
     /// user's keyboard layout and input method treat it as they would the real key; one
     /// `SendInput` call, so no other input interleaves. If Windows takes only part of it, every
@@ -392,7 +420,7 @@ mod win {
         widget
     }
 
-    fn mouse(x: i32, y: i32, flags: MOUSE_EVENT_FLAGS) -> INPUT {
+    fn mouse(x: i32, y: i32, flags: MOUSE_EVENT_FLAGS, data: i32) -> INPUT {
         // SAFETY: plain queries of the virtual screen's bounds.
         let (vx, vy, vw, vh) = unsafe {
             (
@@ -410,6 +438,7 @@ mod win {
                 mi: MOUSEINPUT {
                     dx: nx,
                     dy: ny,
+                    mouseData: data as u32,
                     dwFlags: flags | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
                     ..Default::default()
                 },
@@ -421,6 +450,56 @@ mod win {
     /// there, once the window under that point is that page's; the screen point, in physical
     /// pixels.
     pub fn click(pid: u32, css: (f64, f64), ratio: f64, how: Click) -> Result<(i32, i32), OsError> {
+        at_page_point(pid, css, ratio, |at| {
+            let mut inputs = vec![mouse(at.0, at.1, MOUSEEVENTF_MOVE, 0)];
+            if !how.hover {
+                let (down, up) = if how.right {
+                    (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP)
+                } else {
+                    (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP)
+                };
+                for _ in 0..how.count {
+                    inputs.push(mouse(at.0, at.1, down, 0));
+                    inputs.push(mouse(at.0, at.1, up, 0));
+                }
+            }
+            inputs
+        })
+    }
+
+    /// Moves the cursor to a point of the page and turns the wheel `notches` notches, positive
+    /// towards the user (scrolling down), as a hand would; the screen point.
+    pub fn wheel(
+        pid: u32,
+        css: (f64, f64),
+        ratio: f64,
+        notches: i32,
+    ) -> Result<(i32, i32), OsError> {
+        at_page_point(pid, css, ratio, |at| {
+            let mut inputs = vec![mouse(at.0, at.1, MOUSEEVENTF_MOVE, 0)];
+            for _ in 0..notches.unsigned_abs() {
+                let delta = if notches > 0 {
+                    -WHEEL_DELTA
+                } else {
+                    WHEEL_DELTA
+                };
+                inputs.push(mouse(at.0, at.1, MOUSEEVENTF_WHEEL, delta));
+            }
+            inputs
+        })
+    }
+
+    /// One notch of the wheel, in the units `MOUSEEVENTF_WHEEL` takes (winuser.h `WHEEL_DELTA`).
+    const WHEEL_DELTA: i32 = 120;
+
+    /// Places a page point (CSS pixels) on the screen in the app's front window, checks that the
+    /// page is what is there, and sends the mouse input `inputs_at` builds for that point.
+    fn at_page_point(
+        pid: u32,
+        css: (f64, f64),
+        ratio: f64,
+        inputs_at: impl FnOnce((i32, i32)) -> Vec<INPUT>,
+    ) -> Result<(i32, i32), OsError> {
         // SAFETY: switches this thread to physical pixels; the previous context is put back below.
         let previous =
             unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
@@ -448,18 +527,7 @@ mod win {
                     at.0, at.1
                 )));
             }
-            let mut inputs = vec![mouse(at.0, at.1, MOUSEEVENTF_MOVE)];
-            if !how.hover {
-                let (down, up) = if how.right {
-                    (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP)
-                } else {
-                    (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP)
-                };
-                for _ in 0..how.count {
-                    inputs.push(mouse(at.0, at.1, down));
-                    inputs.push(mouse(at.0, at.1, up));
-                }
-            }
+            let inputs = inputs_at(at);
             let sent = send(&inputs);
             if sent == inputs.len() {
                 Ok(at)

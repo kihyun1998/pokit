@@ -242,6 +242,27 @@ enum Command {
         into: Option<String>,
         #[arg(long)]
         require_focus: Option<String>,
+        /// `os` sends the keys through the OS, which needs the app in front (`window activate`).
+        #[arg(long, value_enum, default_value_t = request::Route::Cdp)]
+        route: request::Route,
+        /// Run the same keys on CDP, then on the OS, each measured, and report each route's
+        /// send-to-handling latency and their difference. Needs the app in front.
+        #[arg(long)]
+        compare: bool,
+    },
+    /// Turn the mouse wheel over an element or a point, or the middle of the page.
+    Wheel {
+        target: Option<String>,
+        #[arg(long)]
+        x: Option<f64>,
+        #[arg(long)]
+        y: Option<f64>,
+        /// Notches to turn; positive scrolls down, negative up.
+        #[arg(long, allow_hyphen_values = true)]
+        notches: i32,
+        /// `os` turns the wheel through the OS, which needs the app in front and moves the cursor.
+        #[arg(long, value_enum, default_value_t = request::Route::Cdp)]
+        route: request::Route,
     },
     /// Probe frames, keys and an optional element between `measure start` and `measure stop`.
     Measure {
@@ -495,12 +516,29 @@ fn dispatch(cli: Cli) -> (String, i32, Value) {
             interval,
             into,
             require_focus,
+            route,
+            compare,
         } => Request::Hold {
             chord,
             count,
             interval_ms: interval,
             into,
             require_focus,
+            route,
+            compare,
+        },
+        Command::Wheel {
+            target,
+            x,
+            y,
+            notches,
+            route,
+        } => Request::Wheel {
+            target,
+            x,
+            y,
+            notches,
+            route,
         },
         Command::Measure {
             action:

@@ -39,7 +39,7 @@ pub fn routes(command: &str) -> Option<serde_json::Value> {
             "cdp": { "default": true, "takes_focus": false, "ime_composition": true },
             "os": { "takes_focus": true, "needs": "the app in front: `window activate`", "ime_composition": false },
         })),
-        "hold" if cfg!(windows) => Some(json!({ "cdp": cdp })),
+        "hold" | "wheel" if cfg!(windows) => Some(json!({ "cdp": cdp, "os": os })),
         _ => None,
     }
 }

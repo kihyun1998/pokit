@@ -40,6 +40,39 @@ impl KeyPress {
         serde_json::json!({ "type": "keyUp", "key": self.key, "code": self.code,
                             "windowsVirtualKeyCode": self.vk, "modifiers": self.modifiers })
     }
+
+    /// The chord's modifiers as keys of their own, the way a keyboard sends them: the key-downs
+    /// in the order Control, Alt, Shift, Meta, each carrying the modifiers held so far, and the
+    /// key-ups in reverse, each without its own.
+    pub fn modifier_events(&self) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
+        const MODS: [(u32, &str, &str, u32); 4] = [
+            (CTRL, "Control", "ControlLeft", 17),
+            (ALT, "Alt", "AltLeft", 18),
+            (SHIFT, "Shift", "ShiftLeft", 16),
+            (META, "Meta", "MetaLeft", 91),
+        ];
+        let mut held = 0;
+        let mut downs = Vec::new();
+        let mut ups = Vec::new();
+        for (bit, key, code, vk) in MODS.iter().filter(|(bit, ..)| self.modifiers & bit != 0) {
+            held |= bit;
+            downs.push(
+                serde_json::json!({ "type": "rawKeyDown", "key": key, "code": code,
+                                           "windowsVirtualKeyCode": vk, "modifiers": held }),
+            );
+            ups.push((*bit, *key, *code, *vk));
+        }
+        let ups = ups
+            .into_iter()
+            .rev()
+            .map(|(bit, key, code, vk)| {
+                held &= !bit;
+                serde_json::json!({ "type": "keyUp", "key": key, "code": code,
+                                    "windowsVirtualKeyCode": vk, "modifiers": held })
+            })
+            .collect();
+        (downs, ups)
+    }
 }
 
 /// A physical key: its `code`, the key value unshifted and shifted, and its Windows virtual key code.
@@ -220,6 +253,31 @@ pub fn key_for_char(c: char) -> Option<KeyPress> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn modifiers_are_pressed_as_keys_in_order_and_released_in_reverse() {
+        let p = parse_chord("Ctrl+Shift+KeyK").unwrap();
+        let (downs, ups) = p.modifier_events();
+        let keys = |v: &[serde_json::Value]| -> Vec<(String, u64)> {
+            v.iter()
+                .map(|e| {
+                    (
+                        e["key"].as_str().unwrap().to_string(),
+                        e["modifiers"].as_u64().unwrap(),
+                    )
+                })
+                .collect()
+        };
+        assert_eq!(
+            keys(&downs),
+            vec![("Control".into(), 2), ("Shift".into(), 10)]
+        );
+        assert_eq!(keys(&ups), vec![("Shift".into(), 2), ("Control".into(), 0)]);
+        assert_eq!(downs[0]["code"], "ControlLeft");
+        assert_eq!(ups[1]["type"], "keyUp");
+        let (none, _) = parse_chord("KeyK").unwrap().modifier_events();
+        assert!(none.is_empty());
+    }
 
     #[test]
     fn ctrl_equal_matches_the_values_penterm_sends() {

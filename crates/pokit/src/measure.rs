@@ -88,8 +88,9 @@ const INSTALL: &str = r#"(() => {
     };
     m.raf = requestAnimationFrame(frame);
     let open = null;
+    const modifierKeys = ['Control', 'Shift', 'Alt', 'Meta'];
     const keyStart = (e) => {
-        if (!e.isTrusted) return;
+        if (!e.isTrusted || modifierKeys.includes(e.key)) return;
         open = [e.timeStamp, now(), null, e.repeat];
         m.keys.push(open);
     };
@@ -255,6 +256,43 @@ pub fn summarize(raw: &Value, t: &Thresholds) -> Fields {
     }
 }
 
+/// How long each key took from leaving pokit to the page starting to handle it: the measurement's
+/// keys paired in order with the key-downs pokit sent during it (`sent`, page-clock epoch ms).
+pub fn latency(raw: &Value, sent: &[f64], uncertainty_ms: f64) -> Value {
+    let origin = raw["origin"].as_f64().unwrap_or(0.0);
+    let dispatched: Vec<f64> = raw["keys"]
+        .as_array()
+        .map(|keys| {
+            keys.iter()
+                .filter_map(|k| k[1].as_f64())
+                .map(|t| origin + t)
+                .collect()
+        })
+        .unwrap_or_default();
+    let paired = dispatched.len().min(sent.len());
+    let mut lat: Vec<f64> = dispatched.iter().zip(sent).map(|(d, s)| d - s).collect();
+    lat.sort_by(f64::total_cmp);
+    let (p50, p95, max) = if lat.is_empty() {
+        let none = json!("no key paired with a send");
+        (none.clone(), none.clone(), none)
+    } else {
+        (
+            json!(round1(percentile(&lat, 50.0))),
+            json!(round1(percentile(&lat, 95.0))),
+            json!(round1(*lat.last().unwrap())),
+        )
+    };
+    json!({
+        "keys": paired,
+        "p50_ms": p50,
+        "p95_ms": p95,
+        "max_ms": max,
+        "uncertainty_ms": uncertainty_ms,
+        "unpaired_keys": dispatched.len() - paired,
+        "unpaired_sends": sent.len() - paired,
+    })
+}
+
 /// The nearest-rank percentile of sorted values.
 fn percentile(sorted: &[f64], p: f64) -> f64 {
     let rank = ((p / 100.0) * sorted.len() as f64).ceil() as usize;
@@ -382,6 +420,24 @@ mod tests {
             json!({ "long_frame_ms": 30.0, "over_ms": 40.0, "quiet_ms": 500, "ceiling_ms": 2000 })
         );
         assert_eq!(s["frames"]["over_threshold"], 1);
+    }
+
+    #[test]
+    fn latency_pairs_keys_with_sends_in_order() {
+        let raw = json!({
+            "origin": 1000.0,
+            "keys": [[0.0, 10.0, 12.0, false], [0.0, 50.0, 52.0, true], [0.0, 95.0, 96.0, true]],
+        });
+        let l = latency(&raw, &[1005.0, 1040.0, 1080.0, 1120.0], 0.3);
+        assert_eq!(
+            l,
+            json!({ "keys": 3, "p50_ms": 10.0, "p95_ms": 15.0, "max_ms": 15.0,
+                    "uncertainty_ms": 0.3, "unpaired_keys": 0, "unpaired_sends": 1 })
+        );
+        let none = latency(&raw, &[], 0.3);
+        assert_eq!(none["keys"], 0);
+        assert_eq!(none["p50_ms"], "no key paired with a send");
+        assert_eq!(none["unpaired_keys"], 3);
     }
 
     #[test]

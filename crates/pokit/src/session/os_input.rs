@@ -116,4 +116,60 @@ impl State {
         };
         Ok(self.stamp(f, &[sent]))
     }
+
+    /// The OS side of `hold`: the modifiers down, `count` key-downs on schedule, then the key and
+    /// the modifiers up; when each key-down and the key-up were sent. Whatever goes wrong, every
+    /// key pressed is released again, whichever app is in front by then.
+    pub(super) async fn os_hold(
+        &self,
+        pid: u32,
+        press: &chord::KeyPress,
+        count: u32,
+        interval: std::time::Duration,
+    ) -> Result<Vec<Instant>, Failure> {
+        let strokes = crate::os_input::chord_strokes(press.code, press.modifiers);
+        let held = (strokes.len() - 2) / 2;
+        let modifiers_down = strokes[..held].to_vec();
+        let key_down = strokes[held].clone();
+        let release: Vec<String> = strokes[held + 1..].iter().map(|(c, _)| c.clone()).collect();
+        let mut sent = Vec::with_capacity(count as usize + 1);
+        let pressed = async {
+            if !modifiers_down.is_empty() {
+                os(move || crate::os_input::strokes(pid, &modifiers_down)).await?;
+            }
+            let start = tokio::time::Instant::now();
+            for n in 0..count {
+                tokio::time::sleep_until(start + interval * n).await;
+                sent.push(Instant::now());
+                let down = vec![key_down.clone()];
+                os(move || crate::os_input::strokes(pid, &down)).await?;
+            }
+            tokio::time::sleep_until(start + interval * count).await;
+            Ok::<_, Failure>(())
+        }
+        .await;
+        sent.push(Instant::now());
+        let up = release.clone();
+        let _ = tokio::task::spawn_blocking(move || crate::os_input::release(&up)).await;
+        pressed.map(|_| sent)
+    }
+
+    /// Turns the wheel through the OS over a page point.
+    pub(super) async fn os_wheel(&self, cdp: &Cdp, x: f64, y: f64, notches: i32) -> Outcome {
+        let pid = self.os_pid()?;
+        let ratio = evaluate(cdp, "devicePixelRatio")
+            .await?
+            .as_f64()
+            .unwrap_or(1.0);
+        let sent = Instant::now();
+        let at = os(move || crate::os_input::wheel(pid, (x, y), ratio, notches)).await?;
+        let f = fields! {
+            "notches" => notches,
+            "x" => x,
+            "y" => y,
+            "screen" => serde_json::json!({ "x": at.0, "y": at.1 }),
+            "route" => "os",
+        };
+        Ok(self.stamp(f, &[sent]))
+    }
 }

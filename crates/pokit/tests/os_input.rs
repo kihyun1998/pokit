@@ -7,6 +7,14 @@ mod common;
 
 use common::*;
 use serde_json::Value;
+use std::sync::Mutex;
+
+/// Held by every test that brings its fixture to the front, so that two never fight for it.
+static FRONT: Mutex<()> = Mutex::new(());
+
+fn front() -> std::sync::MutexGuard<'static, ()> {
+    FRONT.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 fn events(p: &Pokit, prefix: &str) -> Vec<String> {
     let v = p
@@ -36,6 +44,10 @@ fn os_input_to_an_app_not_in_front_is_refused_and_sends_nothing() {
         &["key", "KeyA", "--into", "#name", "--route", "os"][..],
         &["type", "abc", "--into", "#name", "--route", "os"][..],
         &["click", "#show-later", "--route", "os"][..],
+        &[
+            "hold", "KeyA", "--count", "3", "--into", "#name", "--route", "os",
+        ][..],
+        &["wheel", "--notches", "1", "--route", "os"][..],
     ] {
         let r = p.run(args);
         assert_eq!(r.code, 6, "{args:?}: {}", r.out);
@@ -63,6 +75,7 @@ fn os_input_to_an_app_not_in_front_is_refused_and_sends_nothing() {
 /// One test, because each case brings its own fixture to the front.
 #[test]
 fn os_input_reaches_the_page_as_a_hand_would_send_it() {
+    let _front = front();
     let p = Pokit::launch_fixture("os-input");
     let r = p.run(&["window", "activate"]);
     assert_eq!(r.code, 0, "{}", r.out);
@@ -202,4 +215,118 @@ fn capabilities_say_which_routes_take_focus() {
     assert_eq!(c["type"]["routes"]["cdp"]["ime_composition"], true, "{c}");
     assert_eq!(c["type"]["routes"]["os"]["ime_composition"], false, "{c}");
     assert_eq!(c["window"]["takes_focus"], true, "{c}");
+}
+
+/// The scroller's position after `wheel` on `route`, from the top.
+fn wheeled(p: &Pokit, notches: &str, route: &str) -> (Value, Vec<String>) {
+    assert_eq!(
+        p.run(&[
+            "eval",
+            "document.querySelector('#scroller').scrollTop = 0; window.__events.length = 0; true"
+        ])
+        .code,
+        0
+    );
+    let r = p.run(&["wheel", "#scroller", "--notches", notches, "--route", route]);
+    assert_eq!(r.code, 0, "{route}: {}", r.out);
+    std::thread::sleep(std::time::Duration::from_millis(800));
+    let top = p
+        .run(&["eval", "document.querySelector('#scroller').scrollTop"])
+        .out["value"]
+        .clone();
+    (top, events(p, "wheel"))
+}
+
+/// Holds `FRONT`, because each case brings its fixture to the front.
+#[test]
+fn hold_wheel_and_the_comparison_run_on_both_routes() {
+    let _front = front();
+    let p = Pokit::launch_fixture("os-b");
+    assert_eq!(p.run(&["window", "activate"]).code, 0);
+
+    clear_events(&p);
+    assert_eq!(
+        p.run(&[
+            "eval",
+            "window.__repeats = []; document.querySelector('#stall').addEventListener('keydown',              e => { if (e.code === 'KeyB') window.__repeats.push(e.repeat); }); true"
+        ])
+        .code,
+        0
+    );
+    let r = p.run(&[
+        "hold",
+        "Ctrl+KeyB",
+        "--count",
+        "4",
+        "--into",
+        "#stall",
+        "--route",
+        "os",
+    ]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert!(eventually(2000, || events(&p, "keyup").len() == 2));
+    assert_eq!(
+        events(&p, "key"),
+        vec![
+            "keydown:Control",
+            "keydown:b",
+            "keydown:b",
+            "keydown:b",
+            "keydown:b",
+            "keyup:b",
+            "keyup:Control"
+        ],
+        "an OS hold is the modifier down, repeated key-downs, then both up"
+    );
+    assert_eq!(
+        p.run(&["eval", "window.__repeats"]).out["value"],
+        serde_json::json!([false, true, true, true]),
+        "Windows marks every key-down after the first as a repeat"
+    );
+
+    assert_eq!(
+        p.run(&[
+            "eval",
+            "document.querySelector('#scroller').scrollIntoView({ block: 'center' }); true"
+        ])
+        .code,
+        0
+    );
+    for route in ["cdp", "os"] {
+        let (top, wheels) = wheeled(&p, "1", route);
+        assert_eq!(top, 100, "{route}: one notch scrolls 100 CSS pixels");
+        assert_eq!(wheels, vec!["wheel:100"], "{route}");
+    }
+    let (top, _) = wheeled(&p, "1", "os");
+    assert_eq!(top, 100);
+    let r = p.run(&["eval", "document.querySelector('#scroller').scrollIntoView(false);                               window.scrollTo(0, 0);                               document.querySelector('#scroller').getBoundingClientRect().top > innerHeight"]);
+    if r.out["value"] == true {
+        let r = p.run(&["wheel", "#scroller", "--notches", "1"]);
+        assert_eq!(
+            r.code, 5,
+            "a wheel over an element out of view went ahead: {}",
+            r.out
+        );
+    }
+
+    let r = p.run(&[
+        "hold",
+        "KeyA",
+        "--count",
+        "10",
+        "--into",
+        "#stall",
+        "--compare",
+    ]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    for route in ["cdp", "os"] {
+        assert_eq!(r.out[route]["latency"]["keys"], 10, "{route}: {}", r.out);
+        assert!(
+            r.out[route]["latency"]["p50_ms"].is_number(),
+            "{route}: {}",
+            r.out
+        );
+    }
+    assert!(r.out["os_minus_cdp"]["p50_ms"].is_number(), "{}", r.out);
+    assert!(r.out["clock"]["uncertainty_ms"].is_number(), "{}", r.out);
 }

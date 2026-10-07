@@ -18,6 +18,9 @@ pub enum Route {
     Os,
 }
 
+/// How long each measured run of `hold --compare` may wait for the page to settle.
+pub const COMPARE_SETTLE: Duration = Duration::from_secs(10);
+
 /// One command for the session, with its arguments.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "command", content = "args", rename_all = "snake_case")]
@@ -64,6 +67,18 @@ pub enum Request {
         interval_ms: u64,
         into: Option<String>,
         require_focus: Option<String>,
+        #[serde(default)]
+        route: Route,
+        #[serde(default)]
+        compare: bool,
+    },
+    Wheel {
+        target: Option<String>,
+        x: Option<f64>,
+        y: Option<f64>,
+        notches: i32,
+        #[serde(default)]
+        route: Route,
     },
     MeasureStart {
         watch: Option<String>,
@@ -130,6 +145,7 @@ pub enum CommandKind {
     Type,
     Key,
     Hold,
+    Wheel,
     MeasureStart,
     MeasureStop,
     ClipboardRead,
@@ -162,6 +178,7 @@ impl Request {
             Request::Type { .. } => CommandKind::Type,
             Request::Key { .. } => CommandKind::Key,
             Request::Hold { .. } => CommandKind::Hold,
+            Request::Wheel { .. } => CommandKind::Wheel,
             Request::MeasureStart { .. } => CommandKind::MeasureStart,
             Request::MeasureStop { .. } => CommandKind::MeasureStop,
             Request::ClipboardRead => CommandKind::ClipboardRead,
@@ -189,8 +206,18 @@ impl Request {
                 Duration::from_millis(*timeout_ms)
             }
             Request::Hold {
-                count, interval_ms, ..
-            } => Duration::from_millis(u64::from(*count) * interval_ms) + HOLD_ACK_WAIT,
+                count,
+                interval_ms,
+                compare,
+                ..
+            } => {
+                let one = Duration::from_millis(u64::from(*count) * interval_ms) + HOLD_ACK_WAIT;
+                if *compare {
+                    (one + COMPARE_SETTLE) * 2
+                } else {
+                    one
+                }
+            }
             Request::MeasureStop {
                 quiet_ms,
                 ceiling_ms,
@@ -226,6 +253,7 @@ impl CommandKind {
             CommandKind::Type => "type",
             CommandKind::Key => "key",
             CommandKind::Hold => "hold",
+            CommandKind::Wheel => "wheel",
             CommandKind::MeasureStart => "measure_start",
             CommandKind::MeasureStop => "measure_stop",
             CommandKind::ClipboardRead => "clipboard_read",
@@ -254,6 +282,7 @@ impl CommandKind {
             | CommandKind::Type
             | CommandKind::Key
             | CommandKind::Hold
+            | CommandKind::Wheel
             | CommandKind::Wait
             | CommandKind::Eval
             | CommandKind::Snapshot => true,
@@ -287,6 +316,7 @@ impl CommandKind {
             | CommandKind::Type
             | CommandKind::Key
             | CommandKind::Hold
+            | CommandKind::Wheel
             | CommandKind::Capture => true,
             CommandKind::Ping
             | CommandKind::Status
@@ -324,6 +354,7 @@ impl CommandKind {
             | CommandKind::Type
             | CommandKind::Key
             | CommandKind::Hold
+            | CommandKind::Wheel
             | CommandKind::MeasureStart
             | CommandKind::MeasureStop
             | CommandKind::ClipboardRead
@@ -389,6 +420,15 @@ mod tests {
                 interval_ms: 33,
                 into: None,
                 require_focus: None,
+                route: Route::Os,
+                compare: false,
+            },
+            Request::Wheel {
+                target: None,
+                x: Some(1.0),
+                y: Some(2.0),
+                notches: 3,
+                route: Route::Cdp,
             },
             Request::MeasureStart {
                 watch: None,
