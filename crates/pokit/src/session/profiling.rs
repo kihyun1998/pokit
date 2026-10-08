@@ -23,6 +23,7 @@ const TRACE_COMPLETE_WAIT: Duration = Duration::from_secs(30);
 
 impl State {
     pub(super) async fn trace_start_cmd(&self) -> Outcome {
+        let _starting = self.trace_starting.lock().await;
         if self.tracing.lock().unwrap().is_some() {
             return Err(Failure::new(
                 Kind::Error,
@@ -100,6 +101,7 @@ impl State {
                 "profile needs --interval-us of at least 1",
             ));
         }
+        let _starting = self.profile_starting.lock().await;
         if self.profiling.lock().unwrap().is_some() {
             return Err(Failure::new(
                 Kind::Error,

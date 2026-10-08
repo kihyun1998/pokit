@@ -275,6 +275,7 @@ impl State {
             }
             (None, None) => None,
         };
+        let _starting = self.measure_starting.lock().await;
         let (target, cdp) = self.current()?;
         self.ensure_ready(&target, &cdp).await?;
         self.remove_probes().await;
