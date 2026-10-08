@@ -118,6 +118,22 @@ fn wait_holds_until_an_element_appears_and_times_out_on_one_that_never_comes() {
 }
 
 #[test]
+fn a_command_the_session_takes_longer_than_3_s_over_still_gets_its_answer() {
+    let p = shared_fixture();
+    let start = std::time::Instant::now();
+    let r = p.run(&[
+        "eval",
+        "new Promise(r => setTimeout(() => r('late'), 4000))",
+    ]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert_eq!(r.out["value"], "late", "{}", r.out);
+    assert!(
+        start.elapsed() >= std::time::Duration::from_secs(4),
+        "the answer came before the page resolved"
+    );
+}
+
+#[test]
 fn input_is_refused_when_focus_is_outside_the_required_target() {
     let p = shared_fixture();
     let r = p.run(&[
