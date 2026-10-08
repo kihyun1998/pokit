@@ -100,6 +100,11 @@ struct State {
     tracing: Mutex<Option<profiling::Recording>>,
     /// The CPU profile between `profile start` and `profile stop`, if one is running.
     profiling: Mutex<Option<profiling::Recording>>,
+    /// Held for the whole of a `measure start`, `trace start` and `profile start`, so that two
+    /// arriving together run one after the other.
+    measure_starting: tokio::sync::Mutex<()>,
+    trace_starting: tokio::sync::Mutex<()>,
+    profile_starting: tokio::sync::Mutex<()>,
     /// Commands waiting for one event from one target.
     waiters: Mutex<Vec<pages::Waiter>>,
     /// What the session did to the user's clipboard.
@@ -226,6 +231,9 @@ async fn serve(mut config: Config) {
         measuring: Mutex::default(),
         tracing: Mutex::default(),
         profiling: Mutex::default(),
+        measure_starting: tokio::sync::Mutex::default(),
+        trace_starting: tokio::sync::Mutex::default(),
+        profile_starting: tokio::sync::Mutex::default(),
         waiters: Mutex::default(),
         clipboard: Mutex::default(),
         foreground_given_back: Mutex::default(),

@@ -109,6 +109,52 @@ fn stop_without_start_and_a_second_start_are_refused() {
 }
 
 #[test]
+fn two_starts_at_once_give_one_recording_and_pokits_own_refusal() {
+    let p = shared_fixture();
+    for what in ["trace", "profile"] {
+        for round in 0..10 {
+            let other = Pokit::on_home(p.home.clone());
+            let racing = std::thread::spawn(move || other.run(&[what, "start"]));
+            let mine = p.run(&[what, "start"]);
+            let theirs = racing.join().unwrap();
+            let codes = [mine.code, theirs.code];
+            assert!(
+                codes.contains(&0) && codes.contains(&1),
+                "{what} round {round}: one start runs and one is refused: {} | {}",
+                mine.out,
+                theirs.out
+            );
+            let refused = if mine.code == 1 { &mine } else { &theirs };
+            let message = refused.out["error"]["message"].as_str().unwrap_or("");
+            assert!(
+                message.contains("already running"),
+                "{what} round {round}: refused with someone else's message: {}",
+                refused.out
+            );
+            assert_eq!(p.run(&[what, "stop"]).code, 0, "{what} round {round}");
+        }
+    }
+
+    // A measurement replaces a running one, so two at once both succeed; what is left must be
+    // one whole measurement.
+    for round in 0..10 {
+        let other = Pokit::on_home(p.home.clone());
+        let racing = std::thread::spawn(move || other.run(&["measure", "start"]));
+        let mine = p.run(&["measure", "start"]);
+        let theirs = racing.join().unwrap();
+        assert_eq!(
+            (mine.code, theirs.code),
+            (0, 0),
+            "round {round}: {} | {}",
+            mine.out,
+            theirs.out
+        );
+        let r = p.run(&["measure", "stop", "--quiet", "100"]);
+        assert_eq!(r.code, 0, "measure round {round}: {}", r.out);
+    }
+}
+
+#[test]
 fn a_reload_during_a_trace_or_profile_voids_the_run_and_keeps_the_file() {
     let p = shared_fixture();
     for what in ["trace", "profile"] {
