@@ -21,17 +21,53 @@ fn workspace_root() -> PathBuf {
 
 /// The fixture app, built once per test run into its own target directory.
 pub fn fixture_exe() -> &'static Path {
-    static EXE: OnceLock<PathBuf> = OnceLock::new();
-    EXE.get_or_init(|| build_fixture("fixture", &[]))
+    static EXE: Built = Built::new();
+    EXE.get(|| build_fixture("fixture", &[]))
 }
 
 /// The fixture app's test build, with pokit's plugin feature on, in a target directory of its own.
 pub fn fixture_test_build_exe() -> &'static Path {
-    static EXE: OnceLock<PathBuf> = OnceLock::new();
-    EXE.get_or_init(|| build_fixture("fixture-pokit", &["--features", "pokit"]))
+    static EXE: Built = Built::new();
+    EXE.get(|| build_fixture("fixture-pokit", &["--features", "pokit"]))
 }
 
-fn build_fixture(target_name: &str, extra: &[&str]) -> PathBuf {
+/// The outcome of one build of the fixture app, failure included, kept for the rest of the test
+/// binary.
+struct Built {
+    outcome: OnceLock<Result<PathBuf, String>>,
+    /// Whether a test has already failed with the build's error.
+    reported: std::sync::atomic::AtomicBool,
+}
+
+impl Built {
+    const fn new() -> Self {
+        Built {
+            outcome: OnceLock::new(),
+            reported: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// The built executable, building it on the first call. When the build failed, the first
+    /// caller fails with cargo's error and every later one with a line pointing back to it.
+    fn get(&'static self, build: impl FnOnce() -> Result<PathBuf, String>) -> &'static Path {
+        match self.outcome.get_or_init(build) {
+            Ok(exe) => exe,
+            Err(e)
+                if !self
+                    .reported
+                    .swap(true, std::sync::atomic::Ordering::SeqCst) =>
+            {
+                panic!("{e}")
+            }
+            Err(_) => panic!(
+                "the fixture app failed to build earlier in this test binary; \
+                 see the first test that failed"
+            ),
+        }
+    }
+}
+
+fn build_fixture(target_name: &str, extra: &[&str]) -> Result<PathBuf, String> {
     let root = workspace_root();
     let target = root.join("target").join(target_name);
     let built = Command::new(env!("CARGO"))
@@ -46,13 +82,16 @@ fn build_fixture(target_name: &str, extra: &[&str]) -> PathBuf {
         let err = String::from_utf8_lossy(&built.stderr);
         let lines: Vec<&str> = err.lines().collect();
         let tail = lines[lines.len().saturating_sub(60)..].join("\n");
-        panic!("fixture app failed to build ({}):\n{tail}", built.status);
+        return Err(format!(
+            "fixture app failed to build ({}):\n{tail}",
+            built.status
+        ));
     }
-    target.join("debug").join(if cfg!(windows) {
+    Ok(target.join("debug").join(if cfg!(windows) {
         "pokit-fixture.exe"
     } else {
         "pokit-fixture"
-    })
+    }))
 }
 
 pub struct Run {
