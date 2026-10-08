@@ -450,11 +450,44 @@ fn a_stale_session_file_never_gets_a_process_pokit_did_not_start_killed() {
     let _ = bystander.kill();
     let _ = bystander.wait();
     p.run(&["close"]);
+    remove_home(&profile);
     assert_eq!(r.code, 0, "{}", r.out);
     assert!(
         alive,
         "a stale session file got a process pokit did not start killed"
     );
+    assert!(!profile.exists(), "the bystander's profile was left behind");
+}
+
+#[test]
+fn old_homes_whose_session_is_gone_are_swept_and_the_rest_kept() {
+    let dir = std::env::temp_dir().join(format!("pokit-sweep-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let home = |name: &str, session: Option<u32>| {
+        let h = dir.join(name);
+        std::fs::create_dir_all(h.join("instances")).unwrap();
+        if let Some(pid) = session {
+            std::fs::write(h.join("session.json"), format!("{{\"pid\":{pid}}}")).unwrap();
+        }
+        h
+    };
+    let gone = home("pokit-test-gone-1", None);
+    let dead = home("pokit-test-dead-2", Some(4_000_000_000));
+    let live = home("pokit-test-live-3", Some(std::process::id()));
+    let other = home("other-4", None);
+
+    assert_eq!(sweep_homes(&dir, std::time::Duration::from_secs(3600)), 0);
+    assert!(gone.exists() && dead.exists() && live.exists() && other.exists());
+
+    assert_eq!(sweep_homes(&dir, std::time::Duration::ZERO), 2);
+    assert!(!gone.exists(), "a home with no session was kept");
+    assert!(!dead.exists(), "a home whose session is gone was kept");
+    assert!(live.exists(), "a home whose session runs was removed");
+    assert!(
+        other.exists(),
+        "a folder that is not a test home was removed"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
