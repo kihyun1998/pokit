@@ -557,12 +557,24 @@ impl State {
         into: Option<&str>,
         require_focus: Option<&str>,
     ) -> Result<Arc<Cdp>, Failure> {
+        self.focus_then(into, require_focus, "").await
+    }
+
+    /// `focus_for_input`, then runs the statements `then` on the page: in the same call as the
+    /// focus with `into`, in a call of their own without.
+    async fn focus_then(
+        &self,
+        into: Option<&str>,
+        require_focus: Option<&str>,
+        then: &str,
+    ) -> Result<Arc<Cdp>, Failure> {
         match into {
             Some(into) => {
                 let (tid, cdp, obj) = self.resolve(into).await?;
                 self.guard_target(&cdp, &obj, into, require_focus).await?;
                 self.ensure_ready(&tid, &cdp).await?;
-                call_on(&cdp, &obj, "function() { this.focus(); return true; }", &[]).await?;
+                let focus = format!("function() {{ this.focus(); {then} return true; }}");
+                call_on(&cdp, &obj, &focus, &[]).await?;
                 self.guard_focus(&cdp, require_focus).await?;
                 Ok(cdp)
             }
@@ -570,6 +582,9 @@ impl State {
                 let (tid, cdp) = self.current()?;
                 self.guard_focus(&cdp, require_focus).await?;
                 self.ensure_ready(&tid, &cdp).await?;
+                if !then.is_empty() {
+                    evaluate(&cdp, &format!("(() => {{ {then} return true; }})()")).await?;
+                }
                 Ok(cdp)
             }
         }
@@ -666,69 +681,19 @@ impl State {
         require_focus: Option<&str>,
     ) -> Outcome {
         let text = text.replace("\r\n", "\n").replace('\r', "\n");
-        let cdp = self.focus_for_input(into, require_focus).await?;
-        let mut keyed = 0;
-        let mut inserted = 0;
-        let mut composed = 0;
+        let cdp = self.focus_then(into, require_focus, COUNT_KEYDOWNS).await?;
+        let mut typed = Typed::default();
         let mut sent = Vec::new();
-        let mut ime = hangul::Composer::default();
-        for c in text.chars() {
-            if hangul::is_composed(c) {
-                if !hangul::is_syllable(c) {
-                    if let Some(rest) = ime.finish() {
-                        commit(&cdp, &rest, &mut sent).await?;
-                    }
-                }
-                for jamo in hangul::keys_for(c) {
-                    let step = ime.press(jamo);
-                    if let Err(e) = send_ime_key(&cdp, jamo, step, &mut sent).await {
-                        let _ = cdp
-                            .call(
-                                "Input.imeSetComposition",
-                                json!({ "text": "", "selectionStart": 0, "selectionEnd": 0 }),
-                            )
-                            .await;
-                        return Err(e);
-                    }
-                }
-                if !hangul::is_syllable(c) {
-                    if let Some(rest) = ime.finish() {
-                        commit(&cdp, &rest, &mut sent).await?;
-                    }
-                }
-                composed += 1;
-                continue;
-            }
-            if let Some(rest) = ime.finish() {
-                commit(&cdp, &rest, &mut sent).await?;
-            }
-            let press = if c == '\n' {
-                chord::parse_chord("Enter").ok()
-            } else {
-                chord::key_for_char(c)
-            };
-            match press {
-                Some(p) => {
-                    send_key(&cdp, &p, &mut sent).await?;
-                    keyed += 1;
-                }
-                None => {
-                    sent.push(Instant::now());
-                    cdp.call("Input.insertText", json!({ "text": c.to_string() }))
-                        .await?;
-                    inserted += 1;
-                }
-            }
-        }
-        if let Some(rest) = ime.finish() {
-            commit(&cdp, &rest, &mut sent).await?;
-        }
-        let f = fields! {
-            "typed_chars" => keyed + inserted + composed,
-            "key_events" => keyed,
-            "inserted_chars" => inserted,
-            "composed_chars" => composed,
+        let result = type_text(&cdp, &text, &mut typed, &mut sent).await;
+        let delivery = check_delivery(&cdp, typed.downs, result.is_ok()).await;
+        result?;
+        let mut f = fields! {
+            "typed_chars" => typed.keyed + typed.inserted + typed.composed,
+            "key_events" => typed.keyed,
+            "inserted_chars" => typed.inserted,
+            "composed_chars" => typed.composed,
         };
+        f.extend(delivery?);
         Ok(self.stamp(f, &sent))
     }
 
@@ -739,11 +704,15 @@ impl State {
         require_focus: Option<&str>,
     ) -> Outcome {
         let press = chord::parse_chord(chord).map_err(|e| Failure::new(Kind::Error, e))?;
-        let cdp = self.focus_for_input(into, require_focus).await?;
+        let cdp = self.focus_then(into, require_focus, COUNT_KEYDOWNS).await?;
         let mut sent = Vec::new();
-        send_key(&cdp, &press, &mut sent).await?;
-        let f =
+        let pressed = send_key(&cdp, &press, &mut sent).await;
+        let downs = *pressed.as_ref().unwrap_or(&0);
+        let delivery = check_delivery(&cdp, downs, pressed.is_ok()).await;
+        pressed?;
+        let mut f =
             fields! { "key" => press.key, "code" => press.code, "modifiers" => press.modifiers };
+        f.extend(delivery?);
         Ok(self.stamp(f, &sent))
     }
 
@@ -1163,9 +1132,10 @@ fn os_route_unsupported() -> Failure {
 }
 
 /// Presses and releases `p` as a keyboard would, its modifiers as keys of their own around it,
-/// noting when each event was sent.
-async fn send_key(cdp: &Cdp, p: &KeyPress, sent: &mut Vec<Instant>) -> Result<(), Failure> {
+/// noting when each event was sent; the number of key-downs sent.
+async fn send_key(cdp: &Cdp, p: &KeyPress, sent: &mut Vec<Instant>) -> Result<usize, Failure> {
     let (downs, ups) = p.modifier_events();
+    let count = downs.len() + 1;
     let events = downs
         .into_iter()
         .chain([p.down_event(false), p.up_event()])
@@ -1174,7 +1144,138 @@ async fn send_key(cdp: &Cdp, p: &KeyPress, sent: &mut Vec<Instant>) -> Result<()
         sent.push(Instant::now());
         cdp.call("Input.dispatchKeyEvent", event).await?;
     }
+    Ok(count)
+}
+
+/// What `type_text` has sent so far.
+#[derive(Default)]
+struct Typed {
+    keyed: usize,
+    inserted: usize,
+    composed: usize,
+    /// Key-downs, which the page sees as `keydown`; inserted text has none.
+    downs: usize,
+}
+
+/// Types `text` on the page: key by key where the US layout has the character, as a 2-Set IME
+/// composes it where it is Hangul, and as inserted text otherwise.
+async fn type_text(
+    cdp: &Cdp,
+    text: &str,
+    typed: &mut Typed,
+    sent: &mut Vec<Instant>,
+) -> Result<(), Failure> {
+    let mut ime = hangul::Composer::default();
+    for c in text.chars() {
+        if hangul::is_composed(c) {
+            if !hangul::is_syllable(c) {
+                if let Some(rest) = ime.finish() {
+                    commit(cdp, &rest, sent).await?;
+                }
+            }
+            for jamo in hangul::keys_for(c) {
+                let step = ime.press(jamo);
+                typed.downs += 1;
+                if let Err(e) = send_ime_key(cdp, jamo, step, sent).await {
+                    let _ = cdp
+                        .call(
+                            "Input.imeSetComposition",
+                            json!({ "text": "", "selectionStart": 0, "selectionEnd": 0 }),
+                        )
+                        .await;
+                    return Err(e);
+                }
+            }
+            if !hangul::is_syllable(c) {
+                if let Some(rest) = ime.finish() {
+                    commit(cdp, &rest, sent).await?;
+                }
+            }
+            typed.composed += 1;
+            continue;
+        }
+        if let Some(rest) = ime.finish() {
+            commit(cdp, &rest, sent).await?;
+        }
+        let press = if c == '\n' {
+            chord::parse_chord("Enter").ok()
+        } else {
+            chord::key_for_char(c)
+        };
+        match press {
+            Some(p) => {
+                typed.downs += send_key(cdp, &p, sent).await?;
+                typed.keyed += 1;
+            }
+            None => {
+                sent.push(Instant::now());
+                cdp.call("Input.insertText", json!({ "text": c.to_string() }))
+                    .await?;
+                typed.inserted += 1;
+            }
+        }
+    }
+    if let Some(rest) = ime.finish() {
+        commit(cdp, &rest, sent).await?;
+    }
     Ok(())
+}
+
+/// Counts the trusted keydowns the page receives, in a capture listener on `window`, until
+/// `check_delivery` reads and removes it.
+const COUNT_KEYDOWNS: &str = "const old = window.__pokitKeydowns; \
+    if (old) window.removeEventListener('keydown', old.h, true); \
+    const c = { n: 0 }; c.h = (e) => { if (e.isTrusted) c.n += 1; }; \
+    window.addEventListener('keydown', c.h, true); window.__pokitKeydowns = c;";
+
+/// Reads and removes the counter `COUNT_KEYDOWNS` installed. When every key was sent (`sent_all`)
+/// and the page received fewer than the `sent` key-downs, fails with how many went missing; when
+/// the count cannot tell (the counter went with its document, or the focus is in a frame, whose
+/// own window took the keys), says so. The fields for the command's result.
+async fn check_delivery(cdp: &Cdp, sent: usize, sent_all: bool) -> Result<Fields, Failure> {
+    let read = evaluate(
+        cdp,
+        "(() => { const c = window.__pokitKeydowns; if (!c) return null; \
+         window.removeEventListener('keydown', c.h, true); delete window.__pokitKeydowns; \
+         const a = document.activeElement; \
+         return { n: c.n, frame: !!a && (a.tagName === 'IFRAME' || a.tagName === 'FRAME') }; })()",
+    )
+    .await;
+    let unverified = |why: &str| {
+        Ok(fields! {
+            "keydowns_sent" => sent,
+            "keydowns_received" => Value::Null,
+            "delivery" => format!("unverified: {why}"),
+        })
+    };
+    let v = match read {
+        Ok(v) if v.is_null() => return unverified("the page changed while the keys were sent"),
+        Ok(v) => v,
+        Err(_) => return unverified("the page could not be read after the keys were sent"),
+    };
+    if v["frame"] == true {
+        return unverified("the focus is in a frame, which counts its own keys");
+    }
+    let received = v["n"].as_u64().unwrap_or(0) as usize;
+    if sent_all && received < sent {
+        let missing = sent - received;
+        return Err(Failure::new(
+            Kind::NotDelivered,
+            format!(
+                "the page received {received} of the {sent} keydowns sent; {missing} never reached \
+                 it. A page listener that calls stopImmediatePropagation on keydown in the capture \
+                 phase on window would also hide them"
+            ),
+        )
+        .with("keydowns_sent", sent)
+        .with("keydowns_received", received)
+        .with("missing", missing));
+    }
+    Ok(fields! {
+        "keydowns_sent" => sent,
+        "keydowns_received" => received,
+        "delivery" => "confirmed",
+    })
 }
 
 /// Scrolls the element into view and returns its viewport rectangle and the page's scroll offset.

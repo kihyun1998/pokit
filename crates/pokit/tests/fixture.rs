@@ -134,6 +134,94 @@ fn a_command_the_session_takes_longer_than_3_s_over_still_gets_its_answer() {
 }
 
 #[test]
+fn type_and_key_report_the_keydowns_the_page_received() {
+    let p = shared_fixture();
+    let r = p.run(&["type", "Ab", "--into", "#name"]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert_eq!(r.out["keydowns_sent"], 3, "Shift, a, b: {}", r.out);
+    assert_eq!(r.out["keydowns_received"], 3, "{}", r.out);
+    assert_eq!(r.out["delivery"], "confirmed", "{}", r.out);
+
+    let r = p.run(&["type", "한", "--into", "#name"]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert_eq!(r.out["keydowns_sent"], 3, "ㅎ ㅏ ㄴ: {}", r.out);
+    assert_eq!(r.out["keydowns_received"], 3, "{}", r.out);
+
+    let r = p.run(&["type", "😀", "--into", "#name"]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert_eq!(
+        r.out["keydowns_sent"], 0,
+        "inserted text has no keydown: {}",
+        r.out
+    );
+
+    let r = p.run(&["key", "Ctrl+KeyK", "--into", "#name"]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert_eq!(r.out["keydowns_sent"], 2, "{}", r.out);
+    assert_eq!(r.out["keydowns_received"], 2, "{}", r.out);
+
+    let r = p.run(&["key", "KeyA"]);
+    assert_eq!(r.code, 0, "without --into: {}", r.out);
+    assert_eq!(r.out["keydowns_received"], 1, "{}", r.out);
+    assert_eq!(
+        p.run(&["eval", "'__pokitKeydowns' in window"]).out["value"],
+        false,
+        "the counter was left on the page"
+    );
+}
+
+#[test]
+fn keydowns_the_page_never_saw_fail_with_how_many_went_missing() {
+    let p = shared_fixture();
+    // The page swallows the trusted keydowns whose key is in `__swallow` before any listener
+    // added later sees them, and puts an untrusted keydown in place of each.
+    assert_eq!(
+        p.run(&[
+            "eval",
+            "window.addEventListener('keydown', e => { \
+               if (e.isTrusted && (window.__swallow || []).includes(e.key)) { \
+                 e.stopImmediatePropagation(); window.dispatchEvent(new KeyboardEvent('keydown', { key: e.key })); } \
+             }, true); true"
+        ])
+        .code,
+        0
+    );
+    for (swallow, args, sent, received) in [
+        (
+            "['a', 'b', 'c']",
+            &["type", "abc", "--into", "#name"][..],
+            3,
+            0,
+        ),
+        ("['b']", &["type", "abc", "--into", "#name"][..], 3, 2),
+        (
+            "['Control', 'k']",
+            &["key", "Ctrl+KeyK", "--into", "#name"][..],
+            2,
+            0,
+        ),
+    ] {
+        let set = format!("window.__swallow = {swallow}; true");
+        assert_eq!(p.run(&["eval", &set]).code, 0);
+        let r = p.run(args);
+        assert_eq!(r.code, 9, "{args:?} swallowing {swallow}: {}", r.out);
+        assert_eq!(r.out["error"]["kind"], "not_delivered", "{}", r.out);
+        assert_eq!(r.out["error"]["keydowns_sent"], sent, "{}", r.out);
+        assert_eq!(r.out["error"]["keydowns_received"], received, "{}", r.out);
+        assert_eq!(r.out["error"]["missing"], sent - received, "{}", r.out);
+        let message = r.out["error"]["message"].as_str().unwrap();
+        assert!(
+            message.contains(&format!("{received} of the {sent}"))
+                && message.contains("stopImmediatePropagation"),
+            "{message}"
+        );
+    }
+    assert_eq!(p.run(&["eval", "window.__swallow = []; true"]).code, 0);
+    let r = p.run(&["type", "d", "--into", "#name"]);
+    assert_eq!(r.code, 0, "once the page stops swallowing: {}", r.out);
+}
+
+#[test]
 fn input_is_refused_when_focus_is_outside_the_required_target() {
     let p = shared_fixture();
     let r = p.run(&[
