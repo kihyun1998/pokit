@@ -39,6 +39,7 @@ extern "system" {
     fn GetAncestor(hwnd: Hwnd, flags: u32) -> Hwnd;
     fn GetWindowRect(hwnd: Hwnd, rect: *mut Rect) -> i32;
     fn ShowWindow(hwnd: Hwnd, cmd: i32) -> i32;
+    fn SetCursorPos(x: i32, y: i32) -> i32;
     #[allow(clippy::too_many_arguments)]
     fn CreateWindowExW(
         ex_style: u32,
@@ -209,6 +210,12 @@ pub fn title(hwnd: isize) -> String {
     // SAFETY: `buf` is valid for its length.
     let n = unsafe { GetWindowTextW(hwnd as Hwnd, buf.as_mut_ptr(), buf.len() as i32) };
     String::from_utf16_lossy(&buf[..n.max(0) as usize])
+}
+
+/// Puts the real cursor at the screen point (`x`, `y`), as the user moving the mouse would.
+pub fn put_cursor(x: i32, y: i32) {
+    // SAFETY: takes plain values.
+    unsafe { SetCursorPos(x, y) };
 }
 
 /// The top-level window under the screen point (`x`, `y`).

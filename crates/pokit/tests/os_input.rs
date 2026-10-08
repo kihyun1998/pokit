@@ -326,6 +326,21 @@ fn hold_wheel_and_the_comparison_run_on_both_routes() {
         cdp_wheels, os_wheels,
         "one notch is one wheel event of the same delta"
     );
+    let r = window::rect(window::foreground());
+    let outside = if r.left >= 10 {
+        (r.left - 10, r.top + 10)
+    } else {
+        (r.right + 10, r.top + 10)
+    };
+    for _ in 0..4 {
+        window::put_cursor(outside.0, outside.1);
+        let (top, wheels) = wheeled(&p, "1", "os");
+        assert_eq!(
+            wheels, cdp_wheels,
+            "one notch that brings the cursor into the window is one wheel event"
+        );
+        assert_eq!(top, cdp_top);
+    }
 
     let r = p.run(&[
         "eval",
