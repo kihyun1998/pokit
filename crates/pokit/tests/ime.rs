@@ -114,9 +114,6 @@ fn composing_needs_no_focus_from_the_user() {
     let p = Pokit::launch_fixture("ime-focus");
     let (value, events) = typed(&p, "한글");
     assert_eq!(value, "한글", "{events:?}");
-    if !common::window::can_take_foreground("composing_needs_no_focus_from_the_user") {
-        return;
-    }
     let after = common::window::foreground();
     assert_eq!(
         after,
