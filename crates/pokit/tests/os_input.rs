@@ -35,6 +35,68 @@ fn clear_events(p: &Pokit) {
     assert_eq!(p.run(&["eval", "window.__events.length = 0"]).code, 0);
 }
 
+/// Holds `FRONT`, because it brings its fixture to the front.
+#[test]
+fn os_type_and_key_count_the_keydowns_the_page_received() {
+    let _front = front();
+    let p = Pokit::launch_fixture("os-delivery");
+    assert_eq!(p.run(&["window", "activate"]).code, 0);
+
+    // One keydown per UTF-16 unit, the emoji two, and the newline one Enter.
+    let r = p.run(&["type", "Ab😀\n한", "--into", "#stall", "--route", "os"]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert_eq!(r.out["keydowns_sent"], 6, "{}", r.out);
+    assert_eq!(r.out["keydowns_received"], 6, "{}", r.out);
+    assert_eq!(r.out["delivery"], "confirmed", "{}", r.out);
+
+    let r = p.run(&["key", "Ctrl+KeyK", "--into", "#stall", "--route", "os"]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert_eq!(r.out["keydowns_sent"], 2, "{}", r.out);
+    assert_eq!(r.out["keydowns_received"], 2, "{}", r.out);
+
+    // The page swallows the trusted keydowns whose key is in `__swallow` before any listener
+    // added later sees them, and puts an untrusted keydown in place of each.
+    assert_eq!(
+        p.run(&[
+            "eval",
+            "window.addEventListener('keydown', e => { \
+               if (e.isTrusted && (window.__swallow || []).includes(e.key)) { \
+                 e.stopImmediatePropagation(); window.dispatchEvent(new KeyboardEvent('keydown', { key: e.key })); } \
+             }, true); true"
+        ])
+        .code,
+        0
+    );
+    for (swallow, args, sent, received) in [
+        (
+            "['b']",
+            &["type", "abc", "--into", "#stall", "--route", "os"][..],
+            3,
+            2,
+        ),
+        (
+            "['Control', 'k']",
+            &["key", "Ctrl+KeyK", "--into", "#stall", "--route", "os"][..],
+            2,
+            0,
+        ),
+    ] {
+        let set = format!("window.__swallow = {swallow}; true");
+        assert_eq!(p.run(&["eval", &set]).code, 0);
+        let r = p.run(args);
+        assert_eq!(r.code, 9, "{args:?} swallowing {swallow}: {}", r.out);
+        assert_eq!(r.out["error"]["kind"], "not_delivered", "{}", r.out);
+        assert_eq!(r.out["error"]["keydowns_sent"], sent, "{}", r.out);
+        assert_eq!(r.out["error"]["keydowns_received"], received, "{}", r.out);
+        assert_eq!(r.out["error"]["missing"], sent - received, "{}", r.out);
+    }
+    assert_eq!(
+        p.run(&["eval", "'__pokitKeydowns' in window"]).out["value"],
+        false,
+        "the counter was left on the page"
+    );
+}
+
 #[test]
 fn os_input_to_an_app_not_in_front_is_refused_and_sends_nothing() {
     let _front = front();

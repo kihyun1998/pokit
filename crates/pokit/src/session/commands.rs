@@ -562,7 +562,7 @@ impl State {
 
     /// `focus_for_input`, then runs the statements `then` on the page: in the same call as the
     /// focus with `into`, in a call of their own without.
-    async fn focus_then(
+    pub(super) async fn focus_then(
         &self,
         into: Option<&str>,
         require_focus: Option<&str>,
@@ -685,7 +685,7 @@ impl State {
         let mut typed = Typed::default();
         let mut sent = Vec::new();
         let result = type_text(&cdp, &text, &mut typed, &mut sent).await;
-        let delivery = check_delivery(&cdp, typed.downs, result.is_ok()).await;
+        let delivery = check_delivery(&cdp, typed.downs, result.is_ok(), 0).await;
         result?;
         let mut f = fields! {
             "typed_chars" => typed.keyed + typed.inserted + typed.composed,
@@ -708,7 +708,7 @@ impl State {
         let mut sent = Vec::new();
         let pressed = send_key(&cdp, &press, &mut sent).await;
         let downs = *pressed.as_ref().unwrap_or(&0);
-        let delivery = check_delivery(&cdp, downs, pressed.is_ok()).await;
+        let delivery = check_delivery(&cdp, downs, pressed.is_ok(), 0).await;
         pressed?;
         let mut f =
             fields! { "key" => press.key, "code" => press.code, "modifiers" => press.modifiers };
@@ -1223,22 +1223,37 @@ async fn type_text(
 
 /// Counts the trusted keydowns the page receives, in a capture listener on `window`, until
 /// `check_delivery` reads and removes it.
-const COUNT_KEYDOWNS: &str = "const old = window.__pokitKeydowns; \
+pub(super) const COUNT_KEYDOWNS: &str = "const old = window.__pokitKeydowns; \
     if (old) window.removeEventListener('keydown', old.h, true); \
     const c = { n: 0 }; c.h = (e) => { if (e.isTrusted) c.n += 1; }; \
     window.addEventListener('keydown', c.h, true); window.__pokitKeydowns = c;";
 
-/// Reads and removes the counter `COUNT_KEYDOWNS` installed. When every key was sent (`sent_all`)
-/// and the page received fewer than the `sent` key-downs, fails with how many went missing; when
-/// the count cannot tell (the counter went with its document, or the focus is in a frame, whose
-/// own window took the keys), says so. The fields for the command's result.
-async fn check_delivery(cdp: &Cdp, sent: usize, sent_all: bool) -> Result<Fields, Failure> {
+/// How long `check_delivery` waits for OS keys still on their way to reach the page.
+pub(super) const OS_KEYS_SETTLE_MS: u64 = 500;
+
+/// Reads and removes the counter `COUNT_KEYDOWNS` installed, once it reaches `sent` or `settle_ms`
+/// has passed. When every key was sent (`sent_all`) and the page received fewer than the `sent`
+/// key-downs, fails with how many went missing; when the count cannot tell (the counter went with
+/// its document, or the focus is in a frame, whose own window took the keys), says so. The fields
+/// for the command's result.
+pub(super) async fn check_delivery(
+    cdp: &Cdp,
+    sent: usize,
+    sent_all: bool,
+    settle_ms: u64,
+) -> Result<Fields, Failure> {
     let read = evaluate(
         cdp,
-        "(() => { const c = window.__pokitKeydowns; if (!c) return null; \
-         window.removeEventListener('keydown', c.h, true); delete window.__pokitKeydowns; \
-         const a = document.activeElement; \
-         return { n: c.n, frame: !!a && (a.tagName === 'IFRAME' || a.tagName === 'FRAME') }; })()",
+        &format!(
+            "new Promise((resolve) => {{ const c = window.__pokitKeydowns; \
+             if (!c) {{ resolve(null); return; }} \
+             const until = performance.now() + {settle_ms}; \
+             const done = () => {{ window.removeEventListener('keydown', c.h, true); \
+               delete window.__pokitKeydowns; const a = document.activeElement; \
+               resolve({{ n: c.n, frame: !!a && (a.tagName === 'IFRAME' || a.tagName === 'FRAME') }}); }}; \
+             const poll = () => (c.n >= {sent} || performance.now() >= until) ? done() : setTimeout(poll, 5); \
+             poll(); }})"
+        ),
     )
     .await;
     let unverified = |why: &str| {
