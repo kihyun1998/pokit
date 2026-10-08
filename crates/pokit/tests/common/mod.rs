@@ -34,14 +34,20 @@ pub fn fixture_test_build_exe() -> &'static Path {
 fn build_fixture(target_name: &str, extra: &[&str]) -> PathBuf {
     let root = workspace_root();
     let target = root.join("target").join(target_name);
-    let status = Command::new(env!("CARGO"))
+    let built = Command::new(env!("CARGO"))
         .args(["build", "-q", "-p", "pokit-fixture", "--target-dir"])
         .arg(&target)
         .args(extra)
         .current_dir(&root)
-        .status()
+        .stdin(Stdio::null())
+        .output()
         .expect("cargo build of the fixture app did not start");
-    assert!(status.success(), "fixture app failed to build");
+    if !built.status.success() {
+        let err = String::from_utf8_lossy(&built.stderr);
+        let lines: Vec<&str> = err.lines().collect();
+        let tail = lines[lines.len().saturating_sub(60)..].join("\n");
+        panic!("fixture app failed to build ({}):\n{tail}", built.status);
+    }
     target.join("debug").join(if cfg!(windows) {
         "pokit-fixture.exe"
     } else {
