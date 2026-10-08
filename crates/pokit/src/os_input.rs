@@ -555,18 +555,26 @@ mod win {
         ratio: f64,
         notches: i32,
     ) -> Result<(i32, i32), OsError> {
-        at_page_point(pid, css, ratio, |at| {
-            let mut inputs = vec![mouse(at.0, at.1, MOUSEEVENTF_MOVE, 0)];
-            for _ in 0..notches.unsigned_abs() {
-                let delta = if notches > 0 {
-                    -WHEEL_DELTA
-                } else {
-                    WHEEL_DELTA
-                };
-                inputs.push(mouse(at.0, at.1, MOUSEEVENTF_WHEEL, delta));
-            }
-            inputs
-        })
+        let at = at_page_point(pid, css, ratio, |at| {
+            vec![mouse(at.0, at.1, MOUSEEVENTF_MOVE, 0)]
+        })?;
+        let delta = if notches > 0 {
+            -WHEEL_DELTA
+        } else {
+            WHEEL_DELTA
+        };
+        let wheels: Vec<INPUT> = (0..notches.unsigned_abs())
+            .map(|_| mouse(at.0, at.1, MOUSEEVENTF_WHEEL, delta))
+            .collect();
+        let sent = send(&wheels);
+        if sent == wheels.len() {
+            Ok(at)
+        } else {
+            Err(OsError::Failed(format!(
+                "Windows took {sent} of {} wheel notches",
+                wheels.len()
+            )))
+        }
     }
 
     /// One notch of the wheel, in the units `MOUSEEVENTF_WHEEL` takes (winuser.h `WHEEL_DELTA`).
