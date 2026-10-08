@@ -1,6 +1,6 @@
 # Testing against the fixture app
 
-How the integration tests run pokit against the fixture app: most on one instance their test binary shares, the rest on their own, one test of a binary at a time (#58). Code: `shared_fixture`, `Shared`, `Turn`, `Pokit::new`, `Pokit::launch_fixture` (crates/pokit/tests/common/mod.rs).
+How the integration tests run pokit against the fixture app: most on one instance their test binary shares, the rest on their own, one test of a binary at a time (#58). Code: `shared_fixture`, `Shared`, `Turn`, `Pokit::new`, `Pokit::launch_fixture`, `sweep_homes`, `KEEP_FAILED_HOME` (crates/pokit/tests/common/mod.rs).
 
 ## Design model
 
@@ -9,6 +9,9 @@ How the integration tests run pokit against the fixture app: most on one instanc
 - **One test of a test binary runs at a time** (`Turn`): a shared session has one page, and tests driving it at once would mix their focus and events. Every `Pokit::new` takes the turn, and `shared_fixture` takes it too, so at most the shared instance and one of a test's own are up. A thread that holds the turn takes it again without waiting, for a test that makes a second `Pokit`.
 - **Between tests the shared instance is reloaded, scrolled to the top and checked** (`reset`): any measurement, trace or profile is stopped, the page is reloaded and waited for by its `timeOrigin`. When the last test left another window, a dialog or a context menu, or the session ended, the instance is launched again instead.
 - **The shared instance is closed, and its home removed, when its test binary exits** (`atexit`, `close_shared`); a static is never dropped, so nothing else would. Its session also ends after 20 s without commands (`SHARED_IDLE`), for a binary that aborts, where `atexit` does not run. Reporting on a failing test never panics again (`eval_quietly`), since a panic while one is unwinding aborts.
+- **A failing test keeps its home** (`Drop for Pokit` removes it only when the thread is not panicking), so its run record, logs and WebView2 profile can be read afterwards; the failure report prints its path. Each is 8–9 MB.
+- **Each test binary, before its first home, removes the `pokit-test-*` homes in the temp directory that last changed more than a day ago and whose session is not running** (`sweep_homes`, `KEEP_FAILED_HOME`): no `session.json`, or its `pid` is not alive. **Maintainer's call (2026-10-08, #65):** they were shown 553 homes (3.4 GB) left from failing tests and the bystander test, and the options of never sweeping, sweeping homes a day old whose session is gone, sweeping every home whose session is gone (which removes a failing binary's home as soon as the next binary in the same run starts), and keeping failed homes under `target/`. They chose the day-old sweep. The first run removed 373 homes (2.2 GB) and its first binary took 151 s against about 13 s.
+- **A test that starts the fixture outside pokit removes the profile it gave it** (the bystander in `a_stale_session_file_never_gets_a_process_pokit_did_not_start_killed`, through `remove_home`); nothing else would, since no `Pokit` owns it.
 - **A second handle on a home leaves it alone** (`Pokit::on_home`): the `wait` test drives its instance from a second thread, and that handle's drop used to remove the home, which on the shared instance is the running session's.
 - **Traps in the turn:** a `Pokit` dropped on a thread other than the one that made it would leave the turn taken for the rest of the binary, since the turn is counted per thread; a thread spawned by a test that calls `Pokit::new` waits for its own parent forever; and `shared_fixture` twice in one test waits for itself. No test does any of these.
 
@@ -26,3 +29,4 @@ How the integration tests run pokit against the fixture app: most on one instanc
 
 - Skipping the reload between tests turned `input_is_refused_when_focus_is_outside_the_required_target` and `refused_input_leaves_focus_where_it_was` red (2026-10-07): the reset is load-bearing.
 - Not tested: relaunching after a test left another window or a dialog, and the at-exit close beyond the measurement above.
+- `old_homes_whose_session_is_gone_are_swept_and_the_rest_kept` (tests/fixture.rs) sweeps a folder of made-up homes. Reddened 2026-10-08: sweeping without the running-session check, without the age check, or without the `pokit-test-` prefix each turned it red.

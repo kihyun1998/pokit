@@ -122,6 +122,10 @@ impl Pokit {
     }
 
     fn unturned(name: &str) -> Self {
+        static SWEPT: OnceLock<()> = OnceLock::new();
+        SWEPT.get_or_init(|| {
+            sweep_homes(&std::env::temp_dir(), KEEP_FAILED_HOME);
+        });
         let home = std::env::temp_dir().join(format!("pokit-test-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).unwrap();
@@ -283,13 +287,49 @@ fn close_home(home: &Path) {
 
 /// Removes a home, retrying for up to 3 s while the instance's WebView2 processes still hold its
 /// profile.
-fn remove_home(home: &Path) {
+pub fn remove_home(home: &Path) {
     for _ in 0..30 {
         if std::fs::remove_dir_all(home).is_ok() || !home.exists() {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
+}
+
+/// How long the home of a failing test is kept after it last changed.
+const KEEP_FAILED_HOME: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// Removes the `pokit-test-*` folders in `dir` last changed at least `older_than` ago whose
+/// session is not running (no `session.json`, or its `pid` is not alive); the number removed.
+pub fn sweep_homes(dir: &Path, older_than: std::time::Duration) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_home = entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("pokit-test-")
+            && entry.file_type().is_ok_and(|t| t.is_dir());
+        let old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .is_ok_and(|t| t.elapsed().unwrap_or_default() >= older_than);
+        if !is_home || !old {
+            continue;
+        }
+        let running = std::fs::read_to_string(path.join("session.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+            .and_then(|v| v["pid"].as_u64())
+            .is_some_and(|pid| process_alive(pid as u32));
+        if !running && std::fs::remove_dir_all(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 /// The fixture instance this test binary shares, ready for one test: the page reloaded and
