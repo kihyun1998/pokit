@@ -14,7 +14,11 @@ How the integration tests run pokit against the fixture app: most on one instanc
 
 ## Measured
 
-- **Before and after, two full runs each (2026-10-07, 16 logical processors):** before, 155 s and 243 s, no failures; after, 218 s and 207 s, no failures, and at most 3 fixture processes up at once (sampled every 0.5 s). Earlier full runs of the old structure that day failed 3–4 fixture tests a run, a different set each time (#47); two clean runs on each side do not show the failure rate has changed.
+- **Before and after, two full runs each (2026-10-07, 16 logical processors):** before, 155 s and 243 s, no failures; after, 218 s and 207 s, no failures, and at most 3 fixture processes up at once (sampled every 0.5 s). Earlier full runs of the old structure that day failed 3–4 fixture tests a run, a different set each time (#47); two clean runs on each side did not show the failure rate had changed (the next entry does).
+- **Failures over a fixed number of runs (2026-10-08, `main` 55f227b, #47):** 5 full runs and 10 runs of `tests/os_input.rs` alone, no input from the user during them. `tests/fixture.rs` failed nothing in 5 runs, 8 clean runs in a row counting the 3 after #59 that #47 records; before #59, most recorded runs had failed. 3 failures, all in `tests/os_input.rs`, none a dropped input (#7) or a time limit (#9):
+  - twice, the CLI reported `no_session` (os error 10060) for a command the session's run record shows succeeded (`window activate`, `hold --compare`), and the session recorded its next command 10 s and 2.8 s later, well inside the CLI's 30 s and 80 s;
+  - once, one OS wheel notch reached the page as two wheel events of 100, and scrolled 150 against the CDP notch's 100.
+- **Maintainer's call (2026-10-08, #47):** they were shown that table and that none of the issue's three remedies (fewer tests at once, looser time limits, waiting for #7) matches a failure seen, and chose to change nothing in how the tests run, close #47, and track the two failures as their own issues.
 - **A shared instance left running holds the fixture's executable,** and the next test binary, which builds the fixture when it starts (`build_fixture`), failed with "failed to remove file … pokit-fixture.exe … access denied". Closing it at exit is what lets the binaries follow each other.
 - `input_carries_its_send_time_on_the_page_clock` now reads a clock aligned at an earlier test's launch; it asserts only that the times are not negative, so it holds either way.
 
