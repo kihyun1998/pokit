@@ -222,6 +222,38 @@ fn keydowns_the_page_never_saw_fail_with_how_many_went_missing() {
 }
 
 #[test]
+fn type_and_key_commands_sent_together_each_confirm_their_own_keys() {
+    let p = shared_fixture();
+    let text = "abcdefghijklmnopqrstuvwxyzabcdefghijklmn";
+    for round in 0..10 {
+        let start = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let others: Vec<_> = [
+            &["type", text, "--into", "#name"][..],
+            &["key", "Ctrl+Shift+KeyK", "--into", "#name"][..],
+        ]
+        .into_iter()
+        .map(|args| {
+            let (home, go) = (p.home.clone(), start.clone());
+            let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            std::thread::spawn(move || {
+                go.wait();
+                let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                Pokit::on_home(home).run(&args)
+            })
+        })
+        .collect();
+        start.wait();
+        let mine = p.run(&["type", text, "--into", "#name"]);
+        let results = std::iter::once(mine).chain(others.into_iter().map(|t| t.join().unwrap()));
+        for (r, sent) in results.zip([40, 40, 3]) {
+            assert_eq!(r.code, 0, "round {round}: {}", r.out);
+            assert_eq!(r.out["delivery"], "confirmed", "round {round}: {}", r.out);
+            assert_eq!(r.out["keydowns_received"], sent, "round {round}: {}", r.out);
+        }
+    }
+}
+
+#[test]
 fn keys_someone_else_types_neither_stand_in_for_a_missing_one_nor_confirm_delivery() {
     let p = shared_fixture();
     assert_eq!(

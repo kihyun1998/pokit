@@ -119,6 +119,9 @@ struct State {
     foreground_at_click: Mutex<Option<(isize, u32)>>,
     /// Held by an OS input command while it runs, so two never interleave on the user's keyboard.
     os_input: tokio::sync::Mutex<()>,
+    /// Held by `type` and `key` while they run, on either route, so two never share the page's
+    /// keydown listener; taken before `os_input`.
+    keydowns: tokio::sync::Mutex<()>,
     /// The keys `hold --route os` has down right now, released when the session ends.
     #[cfg_attr(not(windows), allow(dead_code))]
     keys_down: Mutex<Vec<String>>,
@@ -239,6 +242,7 @@ async fn serve(mut config: Config) {
         foreground_given_back: Mutex::default(),
         foreground_at_click: Mutex::default(),
         os_input: tokio::sync::Mutex::new(()),
+        keydowns: tokio::sync::Mutex::new(()),
         keys_down: Mutex::default(),
     });
 

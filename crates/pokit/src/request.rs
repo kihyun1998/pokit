@@ -225,6 +225,11 @@ impl Request {
         }
     }
 
+    /// Whether the command checks the keydowns the page receives against the keys it sends.
+    pub fn checks_keydowns(&self) -> bool {
+        matches!(self, Request::Type { .. } | Request::Key { .. })
+    }
+
     pub fn kind(&self) -> CommandKind {
         match self {
             Request::Ping => CommandKind::Ping,
