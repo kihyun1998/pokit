@@ -142,6 +142,8 @@ impl Drop for Turn {
 pub struct Pokit {
     pub home: PathBuf,
     pub launched: Option<Value>,
+    /// What `attach` answered, once this home's session attached to an instance.
+    pub attached: Option<Value>,
     turn: Option<Turn>,
     /// Whether dropping it removes the home.
     owns_home: bool,
@@ -161,6 +163,7 @@ impl Pokit {
         Pokit {
             home,
             launched: None,
+            attached: None,
             turn: None,
             owns_home: false,
         }
@@ -177,6 +180,7 @@ impl Pokit {
         Pokit {
             home,
             launched: None,
+            attached: None,
             turn: None,
             owns_home: true,
         }
@@ -193,6 +197,16 @@ impl Pokit {
         let r = p.run(&["launch", &exe]);
         assert_eq!(r.code, 0, "launch failed: {}", r.out);
         p.launched = Some(r.out);
+        p
+    }
+
+    /// A new home whose session is attached to the instance on debugging port `port`; closed on
+    /// drop, which leaves that instance running.
+    pub fn attach(name: &str, port: u64) -> Self {
+        let mut p = Pokit::new(name);
+        let r = p.run(&["attach", "--port", &port.to_string()]);
+        assert_eq!(r.code, 0, "attach failed: {}", r.out);
+        p.attached = Some(r.out);
         p
     }
 
@@ -334,7 +348,8 @@ impl Pokit {
 impl Drop for Pokit {
     fn drop(&mut self) {
         // A failing test prints what the page received, and whether it reloaded since launch.
-        if let (true, Some(launched)) = (std::thread::panicking(), &self.launched) {
+        let session = self.launched.as_ref().or(self.attached.as_ref());
+        if let (true, Some(launched)) = (std::thread::panicking(), session) {
             let page = self.eval_quietly(
                 "JSON.stringify({ origin: performance.timeOrigin, active: document.activeElement?.id, \
                  focus: document.hasFocus(), events: window.__events })",
@@ -345,7 +360,7 @@ impl Drop for Pokit {
                 launched["main"]["time_origin"]
             );
         }
-        if self.launched.is_some() {
+        if session.is_some() {
             close_home(&self.home);
         }
         if self.owns_home && !std::thread::panicking() {

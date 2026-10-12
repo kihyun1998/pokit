@@ -200,23 +200,14 @@ fn closing_an_attached_session_without_stop_leaves_no_probe() {
     let owner = Pokit::launch_fixture("measure-owner");
     let port = owner.launched.as_ref().unwrap()["cdp_port"]
         .as_u64()
-        .unwrap()
-        .to_string();
-    // The attached sessions are marked launched, so that dropping them closes them.
-    let mut guest = Pokit::new("measure-guest");
-    let r = guest.run(&["attach", "--port", &port]);
-    assert_eq!(r.code, 0, "{}", r.out);
-    guest.launched = Some(r.out);
+        .unwrap();
+    let guest = Pokit::attach("measure-guest", port);
     assert_eq!(guest.run(&["measure", "start"]).code, 0);
     let r = owner.run(&["eval", "!!window.__pokitMeasure"]);
     assert_eq!(r.out["value"], true, "{}", r.out);
 
     assert_eq!(guest.run(&["close"]).code, 0);
-    guest.launched = None;
-    let mut fresh = Pokit::new("measure-fresh");
-    let r = fresh.run(&["attach", "--port", &port]);
-    assert_eq!(r.code, 0, "{}", r.out);
-    fresh.launched = Some(r.out);
+    let fresh = Pokit::attach("measure-fresh", port);
     let r = fresh.run(&["eval", "!!window.__pokitMeasure"]);
     assert_eq!(
         r.out["value"], false,
