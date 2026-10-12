@@ -255,6 +255,31 @@ impl Pokit {
         }
     }
 
+    /// Runs `f` while a `hold Backquote` over CDP, from a second thread, puts a trusted keydown
+    /// on the page every 5 ms: keys typed by someone other than the command `f` runs. `f` starts
+    /// once the first of them has reached the page.
+    pub fn while_someone_types<R>(&self, f: impl FnOnce() -> R) -> R {
+        let seen = "window.__otherKeys = 0; window.addEventListener('keydown', e => { \
+                      if (e.isTrusted && e.code === 'Backquote') window.__otherKeys += 1; }, true); true";
+        assert_eq!(self.run(&["eval", seen]).code, 0);
+        let home = self.home.clone();
+        let typist = std::thread::spawn(move || {
+            Pokit::on_home(home).run(&["hold", "Backquote", "--count", "600", "--interval", "5"])
+        });
+        let start = std::time::Instant::now();
+        while self.run(&["eval", "window.__otherKeys"]).out["value"] == 0 {
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(10),
+                "the other keys never reached the page"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let r = f();
+        let held = typist.join().unwrap();
+        assert_eq!(held.code, 0, "the other keys: {}", held.out);
+        r
+    }
+
     /// An element's text, as `read` gives it.
     pub fn read_text(&self, target: &str) -> String {
         self.run(&["read", target]).out["text"]

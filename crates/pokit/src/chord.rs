@@ -35,6 +35,19 @@ impl KeyPress {
         down
     }
 
+    /// The `code` of each key-down a press sends: its modifiers in the order `modifier_events`
+    /// presses them, then the key.
+    pub fn down_codes(&self) -> Vec<String> {
+        let mut codes: Vec<String> = self
+            .modifier_events()
+            .0
+            .iter()
+            .map(|e| e["code"].as_str().unwrap_or("").to_string())
+            .collect();
+        codes.push(self.code.to_string());
+        codes
+    }
+
     /// The key-up event CDP's `Input.dispatchKeyEvent` takes.
     pub fn up_event(&self) -> serde_json::Value {
         serde_json::json!({ "type": "keyUp", "key": self.key, "code": self.code,
@@ -253,6 +266,15 @@ pub fn key_for_char(c: char) -> Option<KeyPress> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_press_sends_a_key_down_for_each_modifier_then_the_key() {
+        assert_eq!(
+            parse_chord("Ctrl+Shift+KeyK").unwrap().down_codes(),
+            ["ControlLeft", "ShiftLeft", "KeyK"]
+        );
+        assert_eq!(parse_chord("Enter").unwrap().down_codes(), ["Enter"]);
+    }
 
     #[test]
     fn modifiers_are_pressed_as_keys_in_order_and_released_in_reverse() {

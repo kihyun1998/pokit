@@ -681,11 +681,11 @@ impl State {
         require_focus: Option<&str>,
     ) -> Outcome {
         let text = text.replace("\r\n", "\n").replace('\r', "\n");
-        let cdp = self.focus_then(into, require_focus, COUNT_KEYDOWNS).await?;
+        let cdp = self.focus_then(into, require_focus, NOTE_KEYDOWNS).await?;
         let mut typed = Typed::default();
         let mut sent = Vec::new();
         let result = type_text(&cdp, &text, &mut typed, &mut sent).await;
-        let delivery = check_delivery(&cdp, typed.downs, result.is_ok(), 0).await;
+        let delivery = check_delivery(&cdp, &typed.downs, result.is_ok(), 0).await;
         result?;
         let mut f = fields! {
             "typed_chars" => typed.keyed + typed.inserted + typed.composed,
@@ -704,11 +704,11 @@ impl State {
         require_focus: Option<&str>,
     ) -> Outcome {
         let press = chord::parse_chord(chord).map_err(|e| Failure::new(Kind::Error, e))?;
-        let cdp = self.focus_then(into, require_focus, COUNT_KEYDOWNS).await?;
+        let cdp = self.focus_then(into, require_focus, NOTE_KEYDOWNS).await?;
         let mut sent = Vec::new();
         let pressed = send_key(&cdp, &press, &mut sent).await;
-        let downs = *pressed.as_ref().unwrap_or(&0);
-        let delivery = check_delivery(&cdp, downs, pressed.is_ok(), 0).await;
+        let downs = pressed.as_ref().cloned().unwrap_or_default();
+        let delivery = check_delivery(&cdp, &downs, pressed.is_ok(), 0).await;
         pressed?;
         let mut f =
             fields! { "key" => press.key, "code" => press.code, "modifiers" => press.modifiers };
@@ -1132,10 +1132,13 @@ fn os_route_unsupported() -> Failure {
 }
 
 /// Presses and releases `p` as a keyboard would, its modifiers as keys of their own around it,
-/// noting when each event was sent; the number of key-downs sent.
-async fn send_key(cdp: &Cdp, p: &KeyPress, sent: &mut Vec<Instant>) -> Result<usize, Failure> {
+/// noting when each event was sent; the `code` of each key-down sent.
+async fn send_key(
+    cdp: &Cdp,
+    p: &KeyPress,
+    sent: &mut Vec<Instant>,
+) -> Result<Vec<String>, Failure> {
     let (downs, ups) = p.modifier_events();
-    let count = downs.len() + 1;
     let events = downs
         .into_iter()
         .chain([p.down_event(false), p.up_event()])
@@ -1144,7 +1147,7 @@ async fn send_key(cdp: &Cdp, p: &KeyPress, sent: &mut Vec<Instant>) -> Result<us
         sent.push(Instant::now());
         cdp.call("Input.dispatchKeyEvent", event).await?;
     }
-    Ok(count)
+    Ok(p.down_codes())
 }
 
 /// What `type_text` has sent so far.
@@ -1153,8 +1156,8 @@ struct Typed {
     keyed: usize,
     inserted: usize,
     composed: usize,
-    /// Key-downs, which the page sees as `keydown`; inserted text has none.
-    downs: usize,
+    /// The `code` of each key-down, which the page sees as `keydown`; inserted text has none.
+    downs: Vec<String>,
 }
 
 /// Types `text` on the page: key by key where the US layout has the character, as a 2-Set IME
@@ -1175,7 +1178,11 @@ async fn type_text(
             }
             for jamo in hangul::keys_for(c) {
                 let step = ime.press(jamo);
-                typed.downs += 1;
+                typed.downs.push(
+                    hangul::key_for(jamo)
+                        .map_or("", |(code, _)| code)
+                        .to_string(),
+                );
                 if let Err(e) = send_ime_key(cdp, jamo, step, sent).await {
                     let _ = cdp
                         .call(
@@ -1204,7 +1211,7 @@ async fn type_text(
         };
         match press {
             Some(p) => {
-                typed.downs += send_key(cdp, &p, sent).await?;
+                typed.downs.extend(send_key(cdp, &p, sent).await?);
                 typed.keyed += 1;
             }
             None => {
@@ -1221,45 +1228,52 @@ async fn type_text(
     Ok(())
 }
 
-/// Counts the trusted keydowns the page receives, in a capture listener on `window`, until
-/// `check_delivery` reads and removes it.
-pub(super) const COUNT_KEYDOWNS: &str = "const old = window.__pokitKeydowns; \
+/// Notes the `code` of each trusted keydown the page receives, in a capture listener on
+/// `window`, until `check_delivery` reads and removes it.
+pub(super) const NOTE_KEYDOWNS: &str = "const old = window.__pokitKeydowns; \
     if (old) window.removeEventListener('keydown', old.h, true); \
-    const c = { n: 0 }; c.h = (e) => { if (e.isTrusted) c.n += 1; }; \
+    const c = { codes: [] }; c.h = (e) => { if (e.isTrusted) c.codes.push(e.code); }; \
     window.addEventListener('keydown', c.h, true); window.__pokitKeydowns = c;";
 
 /// How long `check_delivery` waits for OS keys still on their way to reach the page.
 pub(super) const OS_KEYS_SETTLE_MS: u64 = 500;
 
-/// Reads and removes the counter `COUNT_KEYDOWNS` installed, once it reaches `sent` or `settle_ms`
-/// has passed. When every key was sent (`sent_all`) and the page received fewer than the `sent`
-/// key-downs, fails with how many went missing; when the count cannot tell (the counter went with
-/// its document, or the focus is in a frame, whose own window took the keys), says so. The fields
-/// for the command's result.
+/// Reads and removes the listener `NOTE_KEYDOWNS` installed, once a keydown has arrived for each
+/// of the `sent` codes or `settle_ms` has passed. When every key was sent (`sent_all`) and some
+/// sent key-down has no keydown on the page, fails with how many went missing; when keydowns
+/// pokit did not send arrived as well, or the page cannot tell (the listener went with its
+/// document, or the focus is in a frame, whose own window took the keys), says the delivery is
+/// unverified. The fields for the command's result.
 pub(super) async fn check_delivery(
     cdp: &Cdp,
-    sent: usize,
+    sent: &[String],
     sent_all: bool,
     settle_ms: u64,
 ) -> Result<Fields, Failure> {
+    let want = json!(sent);
     let read = evaluate(
         cdp,
         &format!(
             "new Promise((resolve) => {{ const c = window.__pokitKeydowns; \
              if (!c) {{ resolve(null); return; }} \
              const until = performance.now() + {settle_ms}; \
+             const arrived = () => {{ const left = {{}}; for (const k of {want}) left[k] = (left[k] || 0) + 1; \
+             for (const k of c.codes) if (left[k]) left[k] -= 1; \
+             return Object.values(left).every((n) => n === 0); }}; \
              const done = () => {{ window.removeEventListener('keydown', c.h, true); \
-               delete window.__pokitKeydowns; const a = document.activeElement; \
-               resolve({{ n: c.n, frame: !!a && (a.tagName === 'IFRAME' || a.tagName === 'FRAME') }}); }}; \
-             const poll = () => (c.n >= {sent} || performance.now() >= until) ? done() : setTimeout(poll, 5); \
+             delete window.__pokitKeydowns; const a = document.activeElement; \
+             resolve({{ codes: c.codes, frame: !!a && (a.tagName === 'IFRAME' || a.tagName === 'FRAME') }}); }}; \
+             const poll = () => (arrived() || performance.now() >= until) ? done() : setTimeout(poll, 5); \
              poll(); }})"
         ),
     )
     .await;
+    let n = sent.len();
     let unverified = |why: &str| {
         Ok(fields! {
-            "keydowns_sent" => sent,
+            "keydowns_sent" => n,
             "keydowns_received" => Value::Null,
+            "keydowns_unexpected" => Value::Null,
             "delivery" => format!("unverified: {why}"),
         })
     };
@@ -1271,26 +1285,57 @@ pub(super) async fn check_delivery(
     if v["frame"] == true {
         return unverified("the focus is in a frame, which counts its own keys");
     }
-    let received = v["n"].as_u64().unwrap_or(0) as usize;
-    if sent_all && received < sent {
-        let missing = sent - received;
-        return Err(Failure::new(
-            Kind::NotDelivered,
-            format!(
-                "the page received {received} of the {sent} keydowns sent; {missing} never reached \
-                 it. A page listener that calls stopImmediatePropagation on keydown in the capture \
-                 phase on window would also hide them"
-            ),
-        )
-        .with("keydowns_sent", sent)
-        .with("keydowns_received", received)
-        .with("missing", missing));
+    let codes: Vec<String> = v["codes"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|c| c.as_str().unwrap_or("").to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    let (received, unexpected) = tally(sent, &codes);
+    let others = format!(
+        "{unexpected} keydowns pokit did not send reached the page; someone else may have typed"
+    );
+    if sent_all && received < n {
+        let missing = n - received;
+        let mut message = format!(
+            "the page received {received} of the {n} keydowns sent; {missing} never reached it. \
+             A page listener that calls stopImmediatePropagation on keydown in the capture phase \
+             on window would also hide them"
+        );
+        if unexpected > 0 {
+            message.push_str(&format!(". {others}"));
+        }
+        return Err(Failure::new(Kind::NotDelivered, message)
+            .with("keydowns_sent", n)
+            .with("keydowns_received", received)
+            .with("keydowns_unexpected", unexpected)
+            .with("missing", missing));
     }
     Ok(fields! {
-        "keydowns_sent" => sent,
+        "keydowns_sent" => n,
         "keydowns_received" => received,
-        "delivery" => "confirmed",
+        "keydowns_unexpected" => unexpected,
+        "delivery" => if unexpected > 0 { format!("unverified: {others}") } else { "confirmed".to_string() },
     })
+}
+
+/// How many of the `sent` key-down codes have a keydown among the `received` ones, each keydown
+/// standing for one key-down, and how many received keydowns are left over.
+fn tally(sent: &[String], received: &[String]) -> (usize, usize) {
+    let mut left: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for code in sent {
+        *left.entry(code).or_default() += 1;
+    }
+    let mut unexpected = 0;
+    for code in received {
+        match left.get_mut(code.as_str()) {
+            Some(n) if *n > 0 => *n -= 1,
+            _ => unexpected += 1,
+        }
+    }
+    (received.len() - unexpected, unexpected)
 }
 
 /// Scrolls the element into view and returns its viewport rectangle and the page's scroll offset.
@@ -1354,4 +1399,32 @@ async fn call_on(
         return Err(Failure::new(Kind::JsError, exception_text(e)));
     }
     Ok(r["result"]["value"].clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tally;
+
+    fn codes(c: &[&str]) -> Vec<String> {
+        c.iter().map(|c| c.to_string()).collect()
+    }
+
+    #[test]
+    fn tally_counts_each_sent_key_down_once_whatever_the_order() {
+        let sent = codes(&["ShiftLeft", "KeyA", "KeyA"]);
+        assert_eq!(tally(&sent, &codes(&["KeyA", "ShiftLeft", "KeyA"])), (3, 0));
+        assert_eq!(tally(&sent, &codes(&["KeyA"])), (1, 0));
+        assert_eq!(tally(&sent, &codes(&[])), (0, 0));
+    }
+
+    #[test]
+    fn tally_leaves_keydowns_nobody_sent_over_and_lets_none_stand_in_for_a_missing_one() {
+        let sent = codes(&["KeyA", "KeyB", "KeyC"]);
+        assert_eq!(tally(&sent, &codes(&["KeyA", "Backquote", "KeyC"])), (2, 1));
+        assert_eq!(
+            tally(&sent, &codes(&["KeyA", "KeyB", "KeyC", "KeyA"])),
+            (3, 1)
+        );
+        assert_eq!(tally(&codes(&["", ""]), &codes(&["", "KeyX"])), (1, 1));
+    }
 }

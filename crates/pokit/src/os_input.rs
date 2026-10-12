@@ -155,6 +155,20 @@ pub fn chord_strokes(code: &str, modifiers: u32) -> Vec<(String, bool)> {
     out
 }
 
+/// The `code` of each keydown the page gets when `text` types `text`: none for a character
+/// sent as Unicode, one per UTF-16 unit, and `Enter` for a newline.
+pub fn text_down_codes(text: &str) -> Vec<String> {
+    let mut codes = Vec::new();
+    for c in text.chars() {
+        if c == '\n' {
+            codes.push("Enter".to_string());
+        } else {
+            codes.extend(std::iter::repeat_n(String::new(), c.len_utf16()));
+        }
+    }
+    codes
+}
+
 /// A point in the page's viewport (CSS pixels) on the screen (physical pixels), given where the
 /// viewport's top-left corner is on the screen and the page's device pixel ratio.
 pub fn to_screen(origin: (i32, i32), css: (f64, f64), ratio: f64) -> (i32, i32) {
@@ -635,6 +649,11 @@ mod win {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_text_has_a_codeless_keydown_per_utf16_unit_and_enter_for_a_newline() {
+        assert_eq!(text_down_codes("Ab😀\n한"), ["", "", "", "", "Enter", ""]);
+    }
 
     #[test]
     fn a_drag_path_steps_evenly_along_each_part_and_ends_on_each_point() {
