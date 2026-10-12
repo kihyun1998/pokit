@@ -204,6 +204,9 @@ pub(super) async fn wait_ready(
                             Ok(v) => {
                                 *state.main_origin.lock().unwrap() = v["origin"].clone();
                                 state.ready.lock().unwrap().insert(id);
+                                if let Ok(pages) = crate::devtools::pages(port).await {
+                                    state.sync_targets(&pages).await;
+                                }
                                 Ok(())
                             }
                             Err(last) => Err(format!("the main page did not become ready: {last}")),

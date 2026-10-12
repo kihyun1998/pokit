@@ -11,6 +11,9 @@ fn launch_lists_the_main_page_and_close_removes_the_instance() {
     let mut p = Pokit::launch_fixture("lifecycle");
     let app = p.app_pid();
     assert!(process_alive(app));
+    let main = &p.launched.as_ref().unwrap()["main"];
+    assert_eq!(main["url"], "http://tauri.localhost/", "{main}");
+    assert_eq!(main["title"], "pokit fixture", "{main}");
 
     let r = p.run(&["targets"]);
     assert_eq!(r.code, 0, "{}", r.out);
