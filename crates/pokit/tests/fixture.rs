@@ -222,6 +222,53 @@ fn keydowns_the_page_never_saw_fail_with_how_many_went_missing() {
 }
 
 #[test]
+fn keys_someone_else_types_neither_stand_in_for_a_missing_one_nor_confirm_delivery() {
+    let p = shared_fixture();
+    assert_eq!(
+        p.run(&[
+            "eval",
+            "window.addEventListener('keydown', e => { \
+               if (e.isTrusted && (window.__swallow || []).includes(e.key)) e.stopImmediatePropagation(); \
+             }, true); window.__swallow = ['b']; true"
+        ])
+        .code,
+        0
+    );
+    let r = p.while_someone_types(|| p.run(&["type", "abc", "--into", "#name"]));
+    assert_eq!(r.code, 9, "{}", r.out);
+    assert_eq!(r.out["error"]["keydowns_sent"], 3, "{}", r.out);
+    assert_eq!(r.out["error"]["keydowns_received"], 2, "{}", r.out);
+    assert_eq!(r.out["error"]["missing"], 1, "{}", r.out);
+    assert!(
+        r.out["error"]["keydowns_unexpected"].as_u64() > Some(0),
+        "{}",
+        r.out
+    );
+
+    assert_eq!(p.run(&["eval", "window.__swallow = []; true"]).code, 0);
+    let r = p.while_someone_types(|| p.run(&["type", "abc", "--into", "#name"]));
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert_eq!(r.out["keydowns_received"], 3, "{}", r.out);
+    assert!(r.out["keydowns_unexpected"].as_u64() > Some(0), "{}", r.out);
+    assert!(
+        r.out["delivery"]
+            .as_str()
+            .is_some_and(|d| d.starts_with("unverified:")),
+        "{}",
+        r.out
+    );
+    let out = r.out.to_string();
+    assert!(
+        !out.contains('`') && !out.contains("Backquote"),
+        "the other keys were reported: {out}"
+    );
+
+    let r = p.run(&["type", "abc", "--into", "#name"]);
+    assert_eq!(r.out["delivery"], "confirmed", "{}", r.out);
+    assert_eq!(r.out["keydowns_unexpected"], 0, "{}", r.out);
+}
+
+#[test]
 fn input_is_refused_when_focus_is_outside_the_required_target() {
     let p = shared_fixture();
     let r = p.run(&[

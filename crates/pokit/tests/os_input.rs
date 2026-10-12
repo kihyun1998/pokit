@@ -95,6 +95,46 @@ fn os_type_and_key_count_the_keydowns_the_page_received() {
         false,
         "the counter was left on the page"
     );
+
+    // Keys someone else types, while pokit types: they neither make up for the missing `b` nor
+    // confirm delivery once nothing is missing.
+    assert_eq!(p.run(&["eval", "window.__swallow = ['b']; true"]).code, 0);
+    let args = ["type", "abc", "--into", "#stall", "--route", "os"];
+    let r = p.while_someone_types(|| p.run(&args));
+    assert_eq!(r.code, 9, "{}", r.out);
+    assert_eq!(r.out["error"]["keydowns_received"], 2, "{}", r.out);
+    assert_eq!(r.out["error"]["missing"], 1, "{}", r.out);
+    assert!(
+        r.out["error"]["keydowns_unexpected"].as_u64() > Some(0),
+        "{}",
+        r.out
+    );
+    assert_eq!(p.run(&["eval", "window.__swallow = []; true"]).code, 0);
+    for args in [
+        &args[..],
+        &["key", "Ctrl+KeyK", "--into", "#stall", "--route", "os"][..],
+    ] {
+        let r = p.while_someone_types(|| p.run(args));
+        assert_eq!(r.code, 0, "{args:?}: {}", r.out);
+        assert_eq!(
+            r.out["keydowns_received"], r.out["keydowns_sent"],
+            "{}",
+            r.out
+        );
+        assert!(r.out["keydowns_unexpected"].as_u64() > Some(0), "{}", r.out);
+        assert!(
+            r.out["delivery"]
+                .as_str()
+                .is_some_and(|d| d.starts_with("unverified:")),
+            "{args:?}: {}",
+            r.out
+        );
+        let out = r.out.to_string();
+        assert!(
+            !out.contains('`') && !out.contains("Backquote"),
+            "the other keys were reported: {out}"
+        );
+    }
 }
 
 #[test]

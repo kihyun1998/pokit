@@ -1,7 +1,7 @@
 //! Input on `--route os`: `SendInput` into the app, which must be in front with the page that
 //! takes the input.
 
-use super::commands::{check_delivery, evaluate, ClickHow, COUNT_KEYDOWNS, OS_KEYS_SETTLE_MS};
+use super::commands::{check_delivery, evaluate, ClickHow, NOTE_KEYDOWNS, OS_KEYS_SETTLE_MS};
 use super::State;
 use crate::cdp::Cdp;
 use crate::chord;
@@ -58,12 +58,12 @@ impl State {
     ) -> Outcome {
         let press = chord::parse_chord(chord).map_err(|e| Failure::new(Kind::Error, e))?;
         let pid = self.refuse_unless_front().await?;
-        let cdp = self.focus_then(into, require_focus, COUNT_KEYDOWNS).await?;
+        let cdp = self.focus_then(into, require_focus, NOTE_KEYDOWNS).await?;
         let (code, modifiers) = (press.code.to_string(), press.modifiers);
-        let downs = press.modifier_events().0.len() + 1;
+        let downs = press.down_codes();
         let sent = Instant::now();
         let pressed = os(move || crate::os_input::key(pid, &code, modifiers)).await;
-        let delivery = check_delivery(&cdp, downs, pressed.is_ok(), OS_KEYS_SETTLE_MS).await;
+        let delivery = check_delivery(&cdp, &downs, pressed.is_ok(), OS_KEYS_SETTLE_MS).await;
         pressed?;
         let mut f = fields! {
             "code" => press.code,
@@ -82,13 +82,12 @@ impl State {
     ) -> Outcome {
         let text = text.replace("\r\n", "\n").replace('\r', "\n");
         let pid = self.refuse_unless_front().await?;
-        let cdp = self.focus_then(into, require_focus, COUNT_KEYDOWNS).await?;
+        let cdp = self.focus_then(into, require_focus, NOTE_KEYDOWNS).await?;
         let chars = text.chars().count();
-        // One key-down per UTF-16 unit; a newline is one Enter.
-        let downs = text.encode_utf16().count();
+        let downs = crate::os_input::text_down_codes(&text);
         let sent = Instant::now();
         let typed = os(move || crate::os_input::text(pid, &text)).await;
-        let delivery = check_delivery(&cdp, downs, typed.is_ok(), OS_KEYS_SETTLE_MS).await;
+        let delivery = check_delivery(&cdp, &downs, typed.is_ok(), OS_KEYS_SETTLE_MS).await;
         typed?;
         let mut f = fields! { "typed_chars" => chars, "route" => "os" };
         f.extend(delivery?);
