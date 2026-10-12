@@ -257,10 +257,17 @@ impl Pokit {
 
     /// Runs `f` while a `hold Backquote` over CDP, from a second thread, puts a trusted keydown
     /// on the page every 5 ms: keys typed by someone other than the command `f` runs. `f` starts
-    /// once the first of them has reached the page.
+    /// once the first of them has reached the page. The page then takes 100 ms over the first
+    /// keydown that is not one of them, so held keys queue up while `f`'s command is still
+    /// waiting for its own.
     pub fn while_someone_types<R>(&self, f: impl FnOnce() -> R) -> R {
-        let seen = "window.__otherKeys = 0; window.addEventListener('keydown', e => { \
-                      if (e.isTrusted && e.code === 'Backquote') window.__otherKeys += 1; }, true); true";
+        let seen = "window.__otherKeys = 0; window.__slowOnce = false; \
+                    if (!window.__someoneTypes) { window.__someoneTypes = true; \
+                      window.addEventListener('keydown', e => { if (!e.isTrusted) return; \
+                        if (e.code === 'Backquote') { window.__otherKeys += 1; return; } \
+                        if (window.__slowOnce) { window.__slowOnce = false; \
+                          const until = performance.now() + 100; while (performance.now() < until) {} } \
+                      }, true); } true";
         assert_eq!(self.run(&["eval", seen]).code, 0);
         let home = self.home.clone();
         let typist = std::thread::spawn(move || {
@@ -274,6 +281,7 @@ impl Pokit {
             );
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
+        assert_eq!(self.run(&["eval", "window.__slowOnce = true"]).code, 0);
         let r = f();
         let held = typist.join().unwrap();
         assert_eq!(held.code, 0, "the other keys: {}", held.out);

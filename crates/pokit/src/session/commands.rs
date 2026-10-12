@@ -28,6 +28,11 @@ impl State {
                 secrets.push(text.to_string());
             }
         }
+        let _one_listener = if request.checks_keydowns() {
+            Some(self.keydowns.lock().await)
+        } else {
+            None
+        };
         let _one_at_a_time = if request.sends_os_input() {
             Some(self.os_input.lock().await)
         } else {
