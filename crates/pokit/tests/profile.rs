@@ -187,21 +187,12 @@ fn closing_an_attached_session_ends_its_trace() {
     let owner = Pokit::launch_fixture("trace-owner");
     let port = owner.launched.as_ref().unwrap()["cdp_port"]
         .as_u64()
-        .unwrap()
-        .to_string();
-    // The attached sessions are marked launched, so that dropping them closes them.
-    let mut guest = Pokit::new("trace-guest");
-    let r = guest.run(&["attach", "--port", &port]);
-    assert_eq!(r.code, 0, "{}", r.out);
-    guest.launched = Some(r.out);
+        .unwrap();
+    let guest = Pokit::attach("trace-guest", port);
     assert_eq!(guest.run(&["trace", "start"]).code, 0);
     assert_eq!(guest.run(&["close"]).code, 0);
-    guest.launched = None;
 
-    let mut fresh = Pokit::new("trace-fresh");
-    let r = fresh.run(&["attach", "--port", &port]);
-    assert_eq!(r.code, 0, "{}", r.out);
-    fresh.launched = Some(r.out);
+    let fresh = Pokit::attach("trace-fresh", port);
     let r = fresh.run(&["trace", "start"]);
     assert_eq!(
         r.code, 0,

@@ -412,11 +412,8 @@ fn closing_an_attached_session_leaves_the_app_running() {
     let owner = Pokit::launch_fixture("attach-owner");
     let port = owner.launched.as_ref().unwrap()["cdp_port"]
         .as_u64()
-        .unwrap()
-        .to_string();
-    let guest = Pokit::new("attach-guest");
-    let r = guest.run(&["attach", "--port", &port]);
-    assert_eq!(r.code, 0, "{}", r.out);
+        .unwrap();
+    let guest = Pokit::attach("attach-guest", port);
     assert_eq!(
         guest.run(&["eval", "document.title"]).out["value"],
         "pokit fixture"
@@ -428,6 +425,28 @@ fn closing_an_attached_session_leaves_the_app_running() {
     assert!(
         process_alive(owner.app_pid()),
         "closing an attached session closed the app"
+    );
+}
+
+#[test]
+fn an_attached_session_dropped_without_close_ends_and_leaves_the_app_running() {
+    let owner = Pokit::launch_fixture("attach-dropped-owner");
+    let port = owner.launched.as_ref().unwrap()["cdp_port"]
+        .as_u64()
+        .unwrap();
+    let guest = Pokit::attach("attach-dropped-guest", port);
+    let session = guest.attached.as_ref().unwrap()["session_pid"]
+        .as_u64()
+        .unwrap() as u32;
+    assert!(process_alive(session));
+    drop(guest);
+    assert!(
+        eventually(5000, || !process_alive(session)),
+        "the attached session outlived its handle"
+    );
+    assert!(
+        process_alive(owner.app_pid()),
+        "dropping the attached handle closed the app"
     );
 }
 

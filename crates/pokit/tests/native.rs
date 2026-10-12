@@ -185,13 +185,8 @@ fn an_attached_session_cannot_reach_the_native_ui() {
     let owner = Pokit::launch_fixture("native-owner");
     let port = owner.launched.as_ref().unwrap()["cdp_port"]
         .as_u64()
-        .unwrap()
-        .to_string();
-    // The attached session is marked launched, so that dropping it closes it.
-    let mut guest = Pokit::new("native-guest");
-    let r = guest.run(&["attach", "--port", &port]);
-    assert_eq!(r.code, 0, "{}", r.out);
-    guest.launched = Some(r.out);
+        .unwrap();
+    let guest = Pokit::attach("native-guest", port);
     let r = guest.run(&["native", "list"]);
     assert_eq!(r.code, 7, "{}", r.out);
 }
