@@ -10,6 +10,7 @@ mod measure;
 mod native;
 #[cfg(windows)]
 mod os_input;
+mod page;
 mod pages;
 mod profiling;
 mod record;
@@ -21,10 +22,12 @@ use crate::home::{self, Mode, SessionInfo, Status};
 use crate::output::{self, Failure, Fields, Kind};
 use crate::request::Request;
 use logs::LogEntry;
+use page::PluginPage;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -68,10 +71,15 @@ struct Refs {
 
 struct State {
     config: Config,
+    /// The app's plugin, on a session that reaches the page through it rather than over CDP.
+    plugin: Option<PluginPage>,
     /// The job holding the launched app and everything it starts; ends them all at once.
     job: Option<crate::proc::Job>,
     started: Instant,
     app_pid: Option<u32>,
+    /// Whether the launched app has exited and been reaped, so its pid may already be another
+    /// process's.
+    app_exited: AtomicBool,
     data_dir: Option<PathBuf>,
     /// The profile directory pokit created for this instance, removed when the session ends.
     owned_data_dir: Option<PathBuf>,
@@ -134,9 +142,6 @@ pub fn run(config: Config) {
 }
 
 async fn serve(mut config: Config) {
-    if cfg!(target_os = "macos") {
-        return through_plugin::serve(config).await;
-    }
     let pid = std::process::id();
     let listener = match TcpListener::bind(("127.0.0.1", 0)).await {
         Ok(l) => l,
@@ -149,14 +154,13 @@ async fn serve(mut config: Config) {
             )
         }
     };
-    let port = listener.local_addr().unwrap().port();
     let token = home::token();
     let proof = home::token();
     let mut info = SessionInfo {
         pid,
         status: Status::Starting,
         error: None,
-        port,
+        port: listener.local_addr().unwrap().port(),
         token: token.clone(),
         mode: config.mode,
         app_pid: None,
@@ -171,138 +175,17 @@ async fn serve(mut config: Config) {
         .join("runs")
         .join(format!("{}-{pid}", home::stamp()));
     let _ = std::fs::create_dir_all(&record_dir);
-    let (events_tx, events_rx) = mpsc::unbounded_channel();
 
-    let mut app: Option<tokio::process::Child> = None;
-    let mut data_dir = None;
-    let mut job = None;
-    #[cfg(windows)]
-    let foreground_before = crate::proc::foreground();
-    if config.mode == Mode::Launch {
-        match launch::spawn_app(&config) {
-            Ok((child, dir)) => {
-                info.app_pid = child.id();
-                info.app_started = info.app_pid.and_then(crate::proc::process_start_time);
-                job = crate::proc::Job::kill_on_close()
-                    .filter(|j| info.app_pid.map(|pid| j.assign(pid)).unwrap_or(false));
-                app = Some(child);
-                data_dir = Some(dir);
-            }
-            Err(e) => return fail_start(pid, &config, None, e),
-        }
-        if config.cdp_port == 0 {
-            let dir = data_dir.clone().unwrap();
-            match launch::active_port(&dir, app.as_mut().unwrap(), config.ready_timeout_secs).await
-            {
-                Ok(p) => config.cdp_port = p,
-                Err(e) => return fail_start(pid, &config, info.app_pid, e),
-            }
-        }
-        info.cdp_port = config.cdp_port;
-    }
+    let started = if cfg!(target_os = "macos") {
+        through_plugin::start(&config, &mut info, record_dir).await
+    } else {
+        start_over_cdp(&mut config, &mut info, record_dir).await
+    };
+    let Some((state, app)) = started else {
+        return;
+    };
 
-    let state = Arc::new(State {
-        owned_data_dir: if config.data_dir.is_none() {
-            data_dir.clone()
-        } else {
-            None
-        },
-        config: config.clone(),
-        job,
-        started: Instant::now(),
-        app_pid: info.app_pid,
-        data_dir,
-        record_dir,
-        targets: Mutex::default(),
-        order: Mutex::default(),
-        sync_lock: tokio::sync::Mutex::new(()),
-        ready: Mutex::default(),
-        main: Mutex::default(),
-        current: Mutex::default(),
-        refs: Mutex::new(Refs {
-            map: HashMap::new(),
-            next: 1,
-        }),
-        logs: Mutex::default(),
-        next_log: Mutex::new(1),
-        secrets: Mutex::default(),
-        record_seq: Mutex::new(0),
-        last_activity: Mutex::new(Instant::now()),
-        events_tx,
-        main_origin: Mutex::new(Value::Null),
-        clock: Mutex::default(),
-        measuring: Mutex::default(),
-        tracing: Mutex::default(),
-        profiling: Mutex::default(),
-        measure_starting: tokio::sync::Mutex::default(),
-        trace_starting: tokio::sync::Mutex::default(),
-        profile_starting: tokio::sync::Mutex::default(),
-        waiters: Mutex::default(),
-        clipboard: Mutex::default(),
-        foreground_given_back: Mutex::default(),
-        foreground_at_click: Mutex::default(),
-        os_input: tokio::sync::Mutex::new(()),
-        keydowns: tokio::sync::Mutex::new(()),
-        keys_down: Mutex::default(),
-    });
-
-    if let Some(child) = app.as_mut() {
-        type Reader = Box<dyn tokio::io::AsyncRead + Unpin + Send>;
-        let outputs: [(&'static str, Option<Reader>); 2] = [
-            (
-                "backend-stdout",
-                child.stdout.take().map(|s| Box::new(s) as Reader),
-            ),
-            (
-                "backend-stderr",
-                child.stderr.take().map(|s| Box::new(s) as Reader),
-            ),
-        ];
-        for (source, reader) in outputs {
-            if let Some(reader) = reader {
-                let st = state.clone();
-                tokio::spawn(async move {
-                    let mut lines = BufReader::new(reader).lines();
-                    while let Ok(Some(line)) = lines.next_line().await {
-                        st.log(source, "info", "", line);
-                    }
-                });
-            }
-        }
-    }
-    tokio::spawn(pages::collect_events(state.clone(), events_rx));
-    let launching = Arc::new(std::sync::atomic::AtomicBool::new(true));
-    #[cfg(windows)]
-    let keeping = info.app_pid.map(|pid| {
-        let launching = launching.clone();
-        tokio::spawn(launch::keep_foreground(
-            state.clone(),
-            pid,
-            foreground_before,
-            "during launch",
-            move || launching.load(std::sync::atomic::Ordering::SeqCst),
-        ))
-    });
-
-    let ready = launch::wait_ready(&state, app.as_mut()).await;
-    tokio::time::sleep(LAUNCH_FOCUS_GRACE).await;
-    launching.store(false, std::sync::atomic::Ordering::SeqCst);
-    #[cfg(windows)]
-    if let Some(keeping) = keeping {
-        *state.foreground_given_back.lock().unwrap() = keeping.await.unwrap_or((0, 0));
-    }
-    if let Err(e) = ready {
-        state.try_remove_owned_data_dir_after(info.app_pid);
-        return fail_start(pid, &config, None, e);
-    }
-
-    if let Ok((target, cdp)) = state.current() {
-        if let Err(f) = state.align_clock(&target, &cdp).await {
-            let message = format!("clock alignment failed: {}", f.message);
-            state.log("session", "warning", "", message);
-        }
-    }
-
+    state.align_main_clock().await;
     *state.last_activity.lock().unwrap() = Instant::now();
     info.status = Status::Ready;
     let _ = home::write_session(&info);
@@ -315,10 +198,12 @@ async fn serve(mut config: Config) {
         &started,
     );
 
+    if state.plugin.is_none() {
+        tokio::spawn(pages::discover(state.clone()));
+        tokio::spawn(launch::sweep_profiles(pid));
+    }
     let app = Arc::new(tokio::sync::Mutex::new(app));
-    tokio::spawn(pages::discover(state.clone()));
-    tokio::spawn(launch::sweep_profiles(pid));
-    tokio::spawn(watchdog(state.clone(), app.clone()));
+    tokio::spawn(watchdog(state.clone(), app));
 
     loop {
         let Ok((stream, _)) = listener.accept().await else {
@@ -386,6 +271,114 @@ async fn serve(mut config: Config) {
     }
 }
 
+/// Launches the app with its debugging port open, or attaches to one, and waits until its main
+/// page is ready; `None` once the start has failed and said so.
+async fn start_over_cdp(
+    config: &mut Config,
+    info: &mut SessionInfo,
+    record_dir: PathBuf,
+) -> Option<(Arc<State>, Option<tokio::process::Child>)> {
+    let pid = info.pid;
+    let (events_tx, events_rx) = mpsc::unbounded_channel();
+    let mut app: Option<tokio::process::Child> = None;
+    let mut data_dir = None;
+    let mut job = None;
+    #[cfg(windows)]
+    let foreground_before = crate::proc::foreground();
+    if config.mode == Mode::Launch {
+        match launch::spawn_app(config) {
+            Ok((child, dir)) => {
+                info.app_pid = child.id();
+                info.app_started = info.app_pid.and_then(crate::proc::process_start_time);
+                job = crate::proc::Job::kill_on_close()
+                    .filter(|j| info.app_pid.map(|pid| j.assign(pid)).unwrap_or(false));
+                app = Some(child);
+                data_dir = Some(dir);
+            }
+            Err(e) => {
+                fail_start(pid, config, None, e);
+                return None;
+            }
+        }
+        if config.cdp_port == 0 {
+            let dir = data_dir.clone().unwrap();
+            match launch::active_port(&dir, app.as_mut().unwrap(), config.ready_timeout_secs).await
+            {
+                Ok(p) => config.cdp_port = p,
+                Err(e) => {
+                    fail_start(pid, config, info.app_pid, e);
+                    return None;
+                }
+            }
+        }
+        info.cdp_port = config.cdp_port;
+    }
+
+    let state = Arc::new(State {
+        owned_data_dir: if config.data_dir.is_none() {
+            data_dir.clone()
+        } else {
+            None
+        },
+        job,
+        app_pid: info.app_pid,
+        data_dir,
+        ..State::new(config.clone(), record_dir, events_tx)
+    });
+
+    if let Some(child) = app.as_mut() {
+        type Reader = Box<dyn tokio::io::AsyncRead + Unpin + Send>;
+        let outputs: [(&'static str, Option<Reader>); 2] = [
+            (
+                "backend-stdout",
+                child.stdout.take().map(|s| Box::new(s) as Reader),
+            ),
+            (
+                "backend-stderr",
+                child.stderr.take().map(|s| Box::new(s) as Reader),
+            ),
+        ];
+        for (source, reader) in outputs {
+            if let Some(reader) = reader {
+                let st = state.clone();
+                tokio::spawn(async move {
+                    let mut lines = BufReader::new(reader).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        st.log(source, "info", "", line);
+                    }
+                });
+            }
+        }
+    }
+    tokio::spawn(pages::collect_events(state.clone(), events_rx));
+    let launching = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    #[cfg(windows)]
+    let keeping = info.app_pid.map(|pid| {
+        let launching = launching.clone();
+        tokio::spawn(launch::keep_foreground(
+            state.clone(),
+            pid,
+            foreground_before,
+            "during launch",
+            move || launching.load(std::sync::atomic::Ordering::SeqCst),
+        ))
+    });
+
+    let ready = launch::wait_ready(&state, app.as_mut()).await;
+    tokio::time::sleep(LAUNCH_FOCUS_GRACE).await;
+    launching.store(false, std::sync::atomic::Ordering::SeqCst);
+    #[cfg(windows)]
+    if let Some(keeping) = keeping {
+        *state.foreground_given_back.lock().unwrap() = keeping.await.unwrap_or((0, 0));
+    }
+    if let Err(e) = ready {
+        state.try_remove_owned_data_dir_after(info.app_pid);
+        fail_start(pid, config, None, e);
+        return None;
+    }
+    Some((state, app))
+}
+
 fn fail_start(pid: u32, config: &Config, app_pid: Option<u32>, error: String) {
     if let Some(app) = app_pid {
         let _ = crate::proc::kill_tree(app);
@@ -422,6 +415,7 @@ async fn watchdog(state: Arc<State>, app: Arc<tokio::sync::Mutex<Option<tokio::p
         }
         if let Some(child) = app.lock().await.as_mut() {
             if let Ok(Some(_)) = child.try_wait() {
+                state.app_exited.store(true, Ordering::SeqCst);
                 state.log(
                     "session",
                     "info",
@@ -435,6 +429,63 @@ async fn watchdog(state: Arc<State>, app: Arc<tokio::sync::Mutex<Option<tokio::p
 }
 
 impl State {
+    /// A session on `config` with nothing reached yet, recording into `record_dir`.
+    fn new(config: Config, record_dir: PathBuf, events_tx: mpsc::UnboundedSender<Event>) -> Self {
+        State {
+            config,
+            plugin: None,
+            job: None,
+            started: Instant::now(),
+            app_pid: None,
+            app_exited: AtomicBool::new(false),
+            data_dir: None,
+            owned_data_dir: None,
+            record_dir,
+            targets: Mutex::default(),
+            order: Mutex::default(),
+            sync_lock: tokio::sync::Mutex::new(()),
+            ready: Mutex::default(),
+            main: Mutex::default(),
+            current: Mutex::default(),
+            refs: Mutex::new(Refs {
+                map: HashMap::new(),
+                next: 1,
+            }),
+            logs: Mutex::default(),
+            next_log: Mutex::new(1),
+            secrets: Mutex::default(),
+            record_seq: Mutex::new(0),
+            last_activity: Mutex::new(Instant::now()),
+            events_tx,
+            main_origin: Mutex::new(Value::Null),
+            clock: Mutex::default(),
+            measuring: Mutex::default(),
+            tracing: Mutex::default(),
+            profiling: Mutex::default(),
+            measure_starting: tokio::sync::Mutex::default(),
+            trace_starting: tokio::sync::Mutex::default(),
+            profile_starting: tokio::sync::Mutex::default(),
+            waiters: Mutex::default(),
+            clipboard: Mutex::default(),
+            foreground_given_back: Mutex::default(),
+            foreground_at_click: Mutex::default(),
+            os_input: tokio::sync::Mutex::new(()),
+            keydowns: tokio::sync::Mutex::new(()),
+            keys_down: Mutex::default(),
+        }
+    }
+
+    /// Aligns the page clock on the page commands go to; a failure is logged, not fatal.
+    async fn align_main_clock(&self) {
+        let Ok((target, page)) = self.page() else {
+            return;
+        };
+        if let Err(f) = self.align_clock(&target, &page).await {
+            let message = format!("clock alignment failed: {}", f.message);
+            self.log("session", "warning", "", message);
+        }
+    }
+
     /// Makes one attempt to remove the profile directory pokit created, after ending `app`;
     /// what is still held is left for the next launch's sweep.
     fn try_remove_owned_data_dir_after(&self, app: Option<u32>) {
@@ -461,6 +512,7 @@ impl State {
             if let Some(pid) = self.app_pid {
                 ended["kill"] = match &self.job {
                     Some(job) if job.terminate() => json!("job terminated"),
+                    _ if self.app_exited.load(Ordering::SeqCst) => json!("the app had exited"),
                     _ => json!(crate::proc::kill_tree(pid)),
                 };
             }
@@ -472,6 +524,25 @@ impl State {
     }
 
     fn status(&self) -> Fields {
+        let mut f = fields! {
+            "mode" => self.config.mode.name(),
+            "session_pid" => std::process::id(),
+            "app_pid" => self.app_pid,
+            "record_dir" => self.record_dir.display().to_string(),
+            "idle_timeout_secs" => self.config.idle_timeout_secs,
+            "clock" => self.clock_json(),
+        };
+        f.extend(match &self.plugin {
+            Some(p) => fields! {
+                "plugin_port" => p.plugin.port,
+                "main" => json!({ "webview": p.webview }),
+            },
+            None => self.cdp_status(),
+        });
+        f
+    }
+
+    fn cdp_status(&self) -> Fields {
         let main = self.main.lock().unwrap().clone();
         let (title, url) = self
             .targets
@@ -481,15 +552,9 @@ impl State {
             .map(|t| (t.title.clone(), t.url.clone()))
             .unwrap_or_default();
         fields! {
-            "mode" => self.config.mode.name(),
-            "session_pid" => std::process::id(),
-            "app_pid" => self.app_pid,
             "cdp_port" => self.config.cdp_port,
             "data_dir" => self.data_dir.as_ref().map(|d| d.display().to_string()),
-            "record_dir" => self.record_dir.display().to_string(),
-            "idle_timeout_secs" => self.config.idle_timeout_secs,
             "main" => json!({ "id": main, "title": title, "url": url, "time_origin": *self.main_origin.lock().unwrap() }),
-            "clock" => self.clock_json(),
             "foreground_given_back" => self.foreground_given_back.lock().unwrap().0,
             "foreground_give_back_refused" => self.foreground_given_back.lock().unwrap().1,
         }

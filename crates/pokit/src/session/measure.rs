@@ -1,6 +1,7 @@
 //! Performance: the page clock, `hold`, and `measure start` / `measure stop`.
 
-use super::commands::{evaluate, evaluate_within};
+use super::commands::{evaluate, evaluate_within, EVALUATE_TIMEOUT};
+use super::page::Page;
 use super::State;
 use crate::cdp::{Cdp, Reply};
 use crate::chord;
@@ -40,12 +41,18 @@ pub(super) struct Measuring {
 const REMOVE_WAIT: Duration = Duration::from_secs(2);
 
 impl State {
-    /// Measures the page clock of `target` against pokit's and keeps it for stamping input.
-    pub(super) async fn align_clock(&self, target: &str, cdp: &Cdp) -> Result<Clock, Failure> {
+    /// Measures the page clock of `target`, evaluated `on` its page, against pokit's and keeps it
+    /// for stamping input.
+    pub(super) async fn align_clock(&self, target: &str, on: &Page<'_>) -> Result<Clock, Failure> {
         let mut samples = Vec::with_capacity(clock::SAMPLES);
         for _ in 0..clock::SAMPLES {
             let sent = Instant::now();
-            let page = evaluate(cdp, "performance.timeOrigin + performance.now()").await?;
+            let page = on
+                .eval(
+                    "performance.timeOrigin + performance.now()",
+                    EVALUATE_TIMEOUT,
+                )
+                .await?;
             let received = Instant::now();
             if let Some(page) = page.as_f64() {
                 samples.push(Sample {
@@ -279,7 +286,7 @@ impl State {
         let (target, cdp) = self.current()?;
         self.ensure_ready(&target, &cdp).await?;
         self.remove_probes().await;
-        let clock = self.align_clock(&target, &cdp).await?;
+        let clock = self.align_clock(&target, &Page::Cdp(cdp.clone())).await?;
         let t = Thresholds {
             long_frame_ms,
             over_ms,

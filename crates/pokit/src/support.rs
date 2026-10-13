@@ -22,6 +22,12 @@ pub fn answers(command: &str) -> bool {
     cfg!(target_os = "macos") && ON_MACOS.contains(&command)
 }
 
+/// Whether a session that reaches the page through the plugin answers a request of kind
+/// `kind_name`.
+pub fn plugin_answers(kind_name: &str) -> bool {
+    matches!(kind_name, "ping" | "status") || ON_MACOS.contains(&command_of(kind_name))
+}
+
 /// Whether a session on this platform answers a request of kind `kind_name`.
 pub fn session_answers(kind_name: &str) -> bool {
     matches!(kind_name, "ping" | "status") || answers(command_of(kind_name))
