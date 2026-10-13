@@ -39,6 +39,9 @@ impl State {
             None
         };
         let outcome = match &request {
+            _ if self.plugin.is_some() && !crate::support::plugin_answers(kind.name()) => {
+                Err(crate::support::refused(kind.name()))
+            }
             Request::Ping => Ok(Fields::new()),
             Request::Status => Ok(self.status()),
             Request::Close => {
@@ -388,8 +391,10 @@ impl State {
     }
 
     async fn eval_cmd(&self, expression: &str, timeout_ms: u64) -> Outcome {
-        let (_, cdp) = self.current()?;
-        let value = evaluate_within(&cdp, expression, Duration::from_millis(timeout_ms)).await?;
+        let (_, page) = self.page()?;
+        let value = page
+            .eval(expression, Duration::from_millis(timeout_ms))
+            .await?;
         Ok(fields! { "value" => value })
     }
 
@@ -1367,8 +1372,11 @@ pub(super) fn exception_text(details: &Value) -> String {
         .to_string()
 }
 
+/// How long a page helper's evaluation may take.
+pub(super) const EVALUATE_TIMEOUT: Duration = Duration::from_secs(15);
+
 pub(super) async fn evaluate(cdp: &Cdp, expr: &str) -> Result<Value, Failure> {
-    evaluate_within(cdp, expr, Duration::from_secs(15)).await
+    evaluate_within(cdp, expr, EVALUATE_TIMEOUT).await
 }
 
 pub(super) async fn evaluate_within(

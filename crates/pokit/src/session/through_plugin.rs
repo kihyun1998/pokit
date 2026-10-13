@@ -1,17 +1,14 @@
-//! The session on macOS: the launched app's test build, reached through pokit's plugin.
+//! The session's start on macOS: the launched app's test build, reached through pokit's plugin.
 
-use super::{fail_start, Config, MAX_REQUEST};
-use crate::fields;
-use crate::home::{self, Mode, SessionInfo, Status};
-use crate::output::{self, Failure, Fields, Kind, Outcome};
+use super::page::PluginPage;
+use super::{fail_start, Config, State};
+use crate::home::{self, Mode, SessionInfo};
 use crate::plugin::{Plugin, PORT_FILE_VAR, TOKEN_VAR};
-use crate::request::Request;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 
 /// Whether the app's own page has loaded (not the `about:blank` a webview starts on), and is the
 /// one `--main-url` names; asked of the main webview until it says so.
@@ -22,58 +19,28 @@ fn ready_probe(main_url: Option<&str>) -> String {
     format!("location.href !== 'about:blank' && document.readyState === 'complete'{wanted}")
 }
 
-struct PluginSession {
-    config: Config,
-    plugin: Plugin,
-    /// The webview commands go to.
-    main: String,
-    app_pid: Option<u32>,
-    instance_dir: PathBuf,
-    last_activity: Mutex<Instant>,
-}
-
-pub(super) async fn serve(config: Config) {
-    let pid = std::process::id();
-    let listener = match TcpListener::bind(("127.0.0.1", 0)).await {
-        Ok(l) => l,
-        Err(e) => {
-            return fail_start(
-                pid,
-                &config,
-                None,
-                format!("could not open the session port: {e}"),
-            )
-        }
-    };
-    let token = home::token();
-    let proof = home::token();
-    let mut info = SessionInfo {
-        pid,
-        status: Status::Starting,
-        error: None,
-        port: listener.local_addr().unwrap().port(),
-        token: token.clone(),
-        mode: config.mode,
-        app_pid: None,
-        app_exe: config.exe.clone(),
-        app_started: None,
-        cdp_port: 0,
-        proof: proof.clone(),
-    };
-    let _ = home::write_session(&info);
+/// Launches the app's test build and waits until its plugin answers and its main page has
+/// loaded; `None` once the start has failed and said so.
+pub(super) async fn start(
+    config: &Config,
+    info: &mut SessionInfo,
+    record_dir: PathBuf,
+) -> Option<(Arc<State>, Option<tokio::process::Child>)> {
+    let pid = info.pid;
     if config.mode != Mode::Launch {
-        return fail_start(pid, &config, None, "attach is not built on macOS".into());
+        fail_start(pid, config, None, "attach is not built on macOS".into());
+        return None;
     }
-
     let instance_dir = home::home()
         .join("instances")
         .join(format!("{}-{pid}", home::stamp()));
     let plugin_token = home::token();
     let fail = |app: Option<u32>, error: String| {
-        fail_start(pid, &config, app, error);
+        fail_start(pid, config, app, error);
         let _ = std::fs::remove_dir_all(&instance_dir);
+        None
     };
-    let mut child = match spawn_app(&config, &instance_dir, &plugin_token) {
+    let mut child = match spawn_app(config, &instance_dir, &plugin_token) {
         Ok(c) => c,
         Err(e) => return fail(None, e),
     };
@@ -84,87 +51,30 @@ pub(super) async fn serve(config: Config) {
         Err(e) => return fail(info.app_pid, e),
     };
     let plugin = Plugin::new(port, plugin_token);
-    let main = match wait_ready(&plugin, config.main_url.as_deref(), deadline).await {
+    let webview = match wait_ready(&plugin, config.main_url.as_deref(), deadline).await {
         Ok(m) => m,
         Err(e) => return fail(info.app_pid, e),
     };
+    let page = PluginPage { plugin, webview };
+    let state = session(config.clone(), record_dir, page, info.app_pid, instance_dir);
+    Some((state, Some(child)))
+}
 
-    let session = Arc::new(PluginSession {
-        config: config.clone(),
-        plugin,
-        main,
-        app_pid: info.app_pid,
-        instance_dir,
-        last_activity: Mutex::new(Instant::now()),
-    });
-    info.status = Status::Ready;
-    let _ = home::write_session(&info);
-    tokio::spawn(watchdog(session.clone(), child));
-
-    loop {
-        let Ok((stream, _)) = listener.accept().await else {
-            continue;
-        };
-        let st = session.clone();
-        let (token, proof) = (token.clone(), proof.clone());
-        tokio::spawn(async move {
-            let (read, mut write) = stream.into_split();
-            let mut reader = BufReader::new(read.take(MAX_REQUEST));
-            let mut line = String::new();
-            if reader.read_line(&mut line).await.is_err() {
-                return;
-            }
-            let Ok(mut req) = serde_json::from_str::<Value>(&line) else {
-                return;
-            };
-            if req["command"] == "hello" {
-                let answer = json!({ "proof": proof });
-                if write
-                    .write_all(format!("{answer}\n").as_bytes())
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-                line.clear();
-                if reader.read_line(&mut line).await.is_err() {
-                    return;
-                }
-                let Ok(next) = serde_json::from_str::<Value>(&line) else {
-                    return;
-                };
-                req = next;
-            }
-            if req["token"].as_str() != Some(token.as_str()) {
-                let _ = write
-                    .write_all(b"{\"exit\":1,\"output\":{\"ok\":false,\"error\":{\"kind\":\"error\",\"message\":\"bad token\"}}}\n")
-                    .await;
-                return;
-            }
-            *st.last_activity.lock().unwrap() = Instant::now();
-            let (name, outcome, closing) =
-                match serde_json::from_value::<Request>(req["request"].clone()) {
-                    Ok(request) => {
-                        let name = request.kind().name().to_string();
-                        let closing = matches!(request, Request::Close);
-                        (name, st.handle(request).await, closing)
-                    }
-                    Err(e) => {
-                        let name = req["request"]["command"].as_str().unwrap_or("").to_string();
-                        let failure =
-                            Failure::new(Kind::Error, format!("unknown command `{name}`: {e}"));
-                        (name, Err(failure), false)
-                    }
-                };
-            let (code, out) = output::render(&name, &outcome);
-            let resp = json!({ "exit": code, "output": out });
-            let _ = write.write_all(format!("{resp}\n").as_bytes()).await;
-            let _ = write.flush().await;
-            if closing {
-                st.shutdown(true);
-            }
-        });
-    }
+/// The session on a launched app reached through `page`, owning `instance_dir`.
+fn session(
+    config: Config,
+    record_dir: PathBuf,
+    page: PluginPage,
+    app_pid: Option<u32>,
+    instance_dir: PathBuf,
+) -> Arc<State> {
+    let (events_tx, _) = mpsc::unbounded_channel();
+    Arc::new(State {
+        plugin: Some(page),
+        app_pid,
+        owned_data_dir: Some(instance_dir),
+        ..State::new(config, record_dir, events_tx)
+    })
 }
 
 /// Starts the app with the plugin's token and port file in its environment.
@@ -263,56 +173,92 @@ fn pick_main(webviews: &Value, main_url: Option<&str>) -> Option<String> {
     }
 }
 
-/// Ends the session when it has been idle too long or the launched app has exited.
-async fn watchdog(session: Arc<PluginSession>, mut child: tokio::process::Child) {
-    let idle = Duration::from_secs(session.config.idle_timeout_secs);
-    loop {
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        if matches!(child.try_wait(), Ok(Some(_))) {
-            session.shutdown(false);
-        }
-        if session.last_activity.lock().unwrap().elapsed() > idle {
-            session.shutdown(true);
-        }
-    }
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::request::Request;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::TcpListener;
 
-impl PluginSession {
-    async fn handle(&self, request: Request) -> Outcome {
-        match request {
-            Request::Ping => Ok(Fields::new()),
-            Request::Status => Ok(self.status()),
-            Request::Close => Ok(fields! { "closed" => true }),
-            Request::Eval {
-                expression,
-                timeout_ms,
-            } => {
-                let value = self
-                    .plugin
-                    .eval(&self.main, &expression, Duration::from_millis(timeout_ms))
-                    .await?;
-                Ok(fields! { "value" => value })
+    /// A stand-in for the app's plugin: answers each `eval` with what `answer` gives its script.
+    async fn fake_plugin(answer: fn(&str) -> Value) -> u16 {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let (read, mut write) = stream.into_split();
+                let mut line = String::new();
+                let _ = BufReader::new(read).read_line(&mut line).await;
+                let req: Value = serde_json::from_str(&line).unwrap();
+                let reply = json!({ "ok": true, "value": answer(req["js"].as_str().unwrap()) });
+                let _ = write.write_all(format!("{reply}\n").as_bytes()).await;
             }
-            other => Err(crate::support::refused(other.kind().name())),
+        });
+        port
+    }
+
+    fn config() -> Config {
+        Config {
+            mode: Mode::Launch,
+            exe: None,
+            args: vec![],
+            env: vec![],
+            cdp_port: 0,
+            data_dir: None,
+            main_url: None,
+            idle_timeout_secs: 600,
+            ready_timeout_secs: 30,
         }
     }
 
-    fn status(&self) -> Fields {
-        fields! {
-            "mode" => self.config.mode.name(),
-            "app_pid" => self.app_pid,
-            "plugin_port" => self.plugin.port,
-            "main" => json!({ "webview": self.main }),
-        }
-    }
+    #[tokio::test]
+    async fn a_session_through_the_plugin_answers_eval_and_keeps_the_run_record() {
+        let port = fake_plugin(|js| {
+            if js.contains("performance.timeOrigin") {
+                json!(1_000_000.0)
+            } else {
+                json!(2)
+            }
+        })
+        .await;
+        let dir = std::env::temp_dir().join(format!("pokit-unit-{}", home::token()));
+        let record_dir = dir.join("run");
+        std::fs::create_dir_all(&record_dir).unwrap();
+        let state = session(
+            config(),
+            record_dir.clone(),
+            PluginPage {
+                plugin: Plugin::new(port, "t".into()),
+                webview: "main".into(),
+            },
+            None,
+            dir.join("instance"),
+        );
+        state.align_main_clock().await;
 
-    /// Ends the launched app unless it has already exited, removes what the session wrote, and exits.
-    fn shutdown(&self, end_app: bool) -> ! {
-        home::remove_session_if(std::process::id());
-        if let (true, Some(pid)) = (end_app, self.app_pid) {
-            let _ = crate::proc::kill_tree(pid);
-        }
-        let _ = std::fs::remove_dir_all(&self.instance_dir);
-        std::process::exit(0);
+        let status = state.status();
+        assert_eq!(status["session_pid"], std::process::id());
+        assert_eq!(status["record_dir"], record_dir.display().to_string());
+        assert_eq!(status["clock"]["target"], "main", "{status:?}");
+        assert_eq!(status["plugin_port"], port);
+
+        let (code, out) = state
+            .handle(Request::Eval {
+                expression: "1 + 1".into(),
+                timeout_ms: 1000,
+            })
+            .await;
+        assert_eq!((code, &out["value"]), (0, &json!(2)), "{out}");
+
+        let (_, out) = state.handle(Request::Snapshot).await;
+        assert_eq!(out["error"]["kind"], "unsupported", "{out}");
+
+        let record = std::fs::read_to_string(record_dir.join("record.jsonl")).unwrap();
+        let commands: Vec<String> = record
+            .lines()
+            .map(|l| serde_json::from_str::<Value>(l).unwrap()["command"].to_string())
+            .collect();
+        assert_eq!(commands, ["\"eval\"", "\"snapshot\""], "{record}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

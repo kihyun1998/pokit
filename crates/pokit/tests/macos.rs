@@ -87,6 +87,43 @@ fn eval_runs_in_the_page_and_close_ends_the_app() {
 }
 
 #[test]
+fn launch_reports_the_session_and_the_run_record_keeps_each_command() {
+    let mut p = Pokit::launch_fixture("mac-record");
+    let launched = p.launched.clone().unwrap();
+    assert!(launched["session_pid"].as_u64().is_some(), "{launched}");
+    assert!(
+        launched["clock"]["uncertainty_ms"].as_f64().is_some(),
+        "{launched}"
+    );
+    let record_dir = std::path::PathBuf::from(launched["record_dir"].as_str().unwrap());
+    assert!(record_dir.starts_with(p.home.join("runs")), "{launched}");
+
+    assert_eq!(p.run(&["eval", "1 + 1"]).out["value"], 2);
+    assert_eq!(p.run(&["close"]).code, 0);
+    p.launched = None;
+
+    let commands = || -> Vec<Value> {
+        std::fs::read_to_string(record_dir.join("record.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .map(|l| l["command"].clone())
+            .collect()
+    };
+    assert!(
+        eventually(5000, || commands().contains(&json!("shutdown"))),
+        "{:?}",
+        commands()
+    );
+    let commands = commands();
+    assert_eq!(
+        commands[..3],
+        [json!("launch"), json!("eval"), json!("close")],
+        "{commands:?}"
+    );
+}
+
+#[test]
 fn launch_keeps_its_own_token_over_a_callers_env() {
     let mut p = Pokit::new("mac-env");
     let exe = fixture_test_build_exe().to_str().unwrap().to_string();
