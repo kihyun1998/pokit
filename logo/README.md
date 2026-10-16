@@ -9,3 +9,7 @@ This pack preserves the supplied Pokit master mark in monochrome form.
 - `contact-sheet.png` provides a quick visual review of the main treatments.
 
 Do not stretch, crop, recolour, rotate, or otherwise alter the mark. Preserve its clear space and use the supplied light/dark variants for contrast.
+
+## macOS app icons
+
+Use [the light ICNS](macos/pokit-macos-light.icns) by default, or [the dark ICNS](macos/pokit-macos-dark.icns) as an alternative. See [macOS usage and validation](macos/README.md) and [the preview](macos/pokit-macos-preview.png).
