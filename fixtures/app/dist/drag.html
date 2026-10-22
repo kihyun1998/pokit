@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>pokit fixture - html5 drag</title>
+  <style>
+    body { font: 14px system-ui, sans-serif; margin: 16px; }
+    #h5-drag { width: 120px; height: 40px; background: #cde; }
+    #h5-drop { width: 200px; height: 100px; margin-top: 24px; border: 2px dashed #999; }
+  </style>
+</head>
+<body>
+  <div id="h5-drag" draggable="true">Drag me (HTML5)</div>
+  <div id="h5-drop">Drop here</div>
+  <p id="h5-result" role="status"></p>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    // The window's Tauri drag-and-drop handling, `on` or `off`, set by the window that opened
+    // this page, at the end of its title.
+    document.title += ` (handler ${window.__dragHandler ?? 'on'})`;
+
+    // Every drag and drop event and every button event the page receives, in order, with where
+    // it was and whether it was trusted. `drag` and `dragover` fire on every move, so they are
+    // counted in `window.__dragCounts` and kept in the list only once each.
+    window.__drag = [];
+    window.__dragCounts = {};
+    const describe = (t) => (t && t.id) || (t && t.nodeName) || '';
+    for (const type of ['pointerdown', 'pointerup', 'pointercancel', 'mousedown', 'mouseup',
+                        'dragstart', 'drag', 'dragenter', 'dragover', 'dragleave', 'drop', 'dragend']) {
+      document.addEventListener(type, (e) => {
+        window.__dragCounts[type] = (window.__dragCounts[type] ?? 0) + 1;
+        if ((type === 'drag' || type === 'dragover') && window.__dragCounts[type] > 1) return;
+        window.__drag.push({
+          type,
+          target: describe(e.target),
+          x: Math.round(e.clientX),
+          y: Math.round(e.clientY),
+          sx: e.screenX,
+          sy: e.screenY,
+          trusted: e.isTrusted,
+          effect: e.dataTransfer ? e.dataTransfer.dropEffect : null,
+        });
+      }, true);
+    }
+
+    $('h5-drag').addEventListener('dragstart', (e) => {
+      e.dataTransfer.setData('text/plain', 'h5-block');
+      e.dataTransfer.effectAllowed = 'move';
+      $('h5-result').textContent = 'dragging';
+    });
+    // The drop zone takes a move, and says what was dropped.
+    $('h5-drop').addEventListener('dragover', (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
+    $('h5-drop').addEventListener('drop', (e) => {
+      e.preventDefault();
+      $('h5-result').textContent = `dropped ${e.dataTransfer.getData('text/plain')}`;
+    });
+    // A drag that ends with no drop says where it ended, and whether that was outside the window.
+    $('h5-drag').addEventListener('dragend', (e) => {
+      if (e.dataTransfer.dropEffect !== 'none') return;
+      const out = e.clientX < 0 || e.clientY < 0 || e.clientX >= innerWidth || e.clientY >= innerHeight;
+      $('h5-result').textContent = `${out ? 'out' : 'ended'} at ${e.screenX},${e.screenY}`;
+    });
+  </script>
+</body>
+</html>

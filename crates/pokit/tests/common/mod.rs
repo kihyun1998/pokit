@@ -310,6 +310,35 @@ impl Pokit {
             .to_string()
     }
 
+    /// Opens the fixture's HTML5 drag page in its own window, with Tauri's drag-and-drop handling
+    /// on (`handler`) or off, and makes it the current page.
+    pub fn open_drag_page(&self, handler: bool) {
+        let state = if handler { "on" } else { "off" };
+        let r = self.run(&[
+            "eval",
+            &format!("window.__TAURI__.core.invoke('open_drag_page', {{ handler: {handler} }})"),
+        ]);
+        assert_eq!(r.code, 0, "{}", r.out);
+        let select = format!("handler {state})");
+        assert!(
+            eventually(5000, || self.run(&["targets", "--select", &select]).code
+                == 0),
+            "the drag page with the handler {state} did not open: {}",
+            self.run(&["targets"]).out
+        );
+    }
+
+    /// What the HTML5 drag page counted of each event type, and its result line.
+    pub fn drag_page_counts(&self) -> (Value, String) {
+        let counts = self
+            .run(&["eval", "JSON.stringify(window.__dragCounts)"])
+            .out["value"]
+            .as_str()
+            .map(|s| serde_json::from_str(s).unwrap())
+            .unwrap_or(Value::Null);
+        (counts, self.read_text("#h5-result"))
+    }
+
     /// An element's value, as `read` gives it.
     pub fn read_value(&self, target: &str) -> String {
         self.run(&["read", target]).out["value"]

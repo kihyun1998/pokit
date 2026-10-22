@@ -825,6 +825,27 @@ fn a_chord_on_cdp_presses_its_modifiers_as_keys_like_a_keyboard() {
 }
 
 #[test]
+fn a_drag_on_cdp_drops_an_html5_draggable_with_tauris_drag_handling_on() {
+    let p = Pokit::launch_fixture("html5-drag-cdp");
+    p.open_drag_page(true);
+    let r = p.run(&["drag", "#h5-drag", "--to", "#h5-drop"]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert!(
+        eventually(3000, || p.drag_page_counts().1 == "dropped h5-block"),
+        "the drop zone did not take the drop: {:?}",
+        p.drag_page_counts()
+    );
+    let (counts, _) = p.drag_page_counts();
+    for (event, n) in [("dragstart", 1), ("drop", 1), ("dragend", 1)] {
+        assert_eq!(counts[event], n, "{event}: {counts}");
+    }
+    assert!(
+        counts["dragover"].as_u64().unwrap_or(0) >= 1,
+        "no dragover: {counts}"
+    );
+}
+
+#[test]
 fn a_drag_on_cdp_moves_the_pointer_within_the_page_and_refuses_to_leave_it() {
     let p = shared_fixture();
     let r = p.run(&[
