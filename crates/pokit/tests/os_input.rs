@@ -272,27 +272,26 @@ fn os_input_reaches_the_page_as_a_hand_would_send_it() {
         .run(&["targets", "--select", "second"])
         .code
         == 0));
-    assert_eq!(p.run(&["targets", "--select", "0"]).code, 0);
-    assert_eq!(p.run(&["window", "activate"]).code, 0);
-    let r = p.run(&["targets", "--select", "second"]);
+    let r = p.run(&["window", "activate"]);
     assert_eq!(r.code, 0, "{}", r.out);
-    let in_second = p.run(&["eval", "document.hasFocus()"]).out["value"] == true;
+    assert_eq!(
+        window::title(window::foreground()),
+        "pokit fixture - second",
+        "the second window did not come to the front: {}",
+        r.out
+    );
     assert_eq!(p.run(&["targets", "--select", "0"]).code, 0);
-    if in_second {
-        clear_events(&p);
-        let r = p.run(&["key", "KeyA", "--route", "os"]);
-        assert_eq!(
-            r.code, 6,
-            "OS input went ahead with another window in front: {}",
-            r.out
-        );
-        assert!(
-            events(&p, "key").is_empty(),
-            "the main page got keys meant for no one"
-        );
-    } else {
-        eprintln!("the second window did not come to the front; that case was not tried");
-    }
+    clear_events(&p);
+    let r = p.run(&["key", "KeyA", "--route", "os"]);
+    assert_eq!(
+        r.code, 6,
+        "OS input went ahead with another window in front: {}",
+        r.out
+    );
+    assert!(
+        events(&p, "key").is_empty(),
+        "the main page got keys meant for no one"
+    );
 
     // With the app's own dialog in front, the input would go to the dialog.
     assert_eq!(p.run(&["native", "choose", "Help > Ask"]).code, 0);
@@ -560,16 +559,18 @@ fn a_drag_out_of_the_window_through_the_os_opens_a_window_where_it_was_dropped()
     );
 }
 
-/// Holds `FRONT`, because the drags bring their fixture to the front. Each drag page opens with
-/// the app already in front, so that its window takes the focus, and is dragged in at once.
+/// Holds `FRONT`, because the drags bring their fixture to the front.
 #[test]
 fn an_os_drag_drops_an_html5_draggable_only_with_tauris_drag_handling_off() {
     let _front = front();
     let p = Pokit::launch_fixture("html5-drag-os");
+    // Each drag page is placed apart from the other.
     let drag = |handler: bool| {
-        assert_eq!(p.run(&["window", "activate"]).code, 0);
         p.open_drag_page(handler);
-        assert_eq!(p.run(&["window", "move", "--x", "40", "--y", "40"]).code, 0);
+        let at = if handler { "80" } else { "40" };
+        assert_eq!(p.run(&["window", "move", "--x", at, "--y", at]).code, 0);
+        let r = p.run(&["window", "activate"]);
+        assert_eq!(r.out["window"], "page", "handler {handler}: {}", r.out);
         let r = p.run(&["drag", "#h5-drag", "--to", "#h5-drop", "--route", "os"]);
         assert_eq!(r.code, 0, "handler {handler}: {}", r.out);
         assert!(
@@ -591,4 +592,60 @@ fn an_os_drag_drops_an_html5_draggable_only_with_tauris_drag_handling_off() {
         "the page saw the drag over it with the handler on: {counts}"
     );
     assert!(result.starts_with("ended at"), "{result}: {counts}");
+}
+
+/// Holds `FRONT`, because both fixtures are brought to the front in turn.
+#[test]
+fn window_activate_brings_forward_the_window_of_the_current_page() {
+    let _front = front();
+    let p = Pokit::launch_fixture("activate-page");
+    let other = Pokit::launch_fixture("activate-other");
+    assert_eq!(p.run(&["click", "#open-second"]).code, 0);
+    assert!(eventually(5000, || p
+        .run(&["targets", "--select", "second"])
+        .code
+        == 0));
+    // The foreground window's title, read from the system.
+    let front = || window::title(window::foreground());
+
+    // With the app's main window in front.
+    assert_eq!(p.run(&["targets", "--select", "0"]).code, 0);
+    assert_eq!(p.run(&["window", "activate"]).code, 0);
+    assert_eq!(front(), "pokit fixture", "the main window is not in front");
+    assert_eq!(p.run(&["targets", "--select", "second"]).code, 0);
+    let r = p.run(&["window", "activate"]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert_eq!(r.out["window"], "page", "{}", r.out);
+    assert_ne!(r.out["how"], "AlreadyFront", "{}", r.out);
+    assert_eq!(front(), "pokit fixture - second", "{}", r.out);
+    let r = p.run(&["key", "KeyA", "--route", "os"]);
+    assert_eq!(
+        r.code, 0,
+        "the key did not reach the second page: {}",
+        r.out
+    );
+
+    // With another app in front.
+    assert_eq!(other.run(&["window", "activate"]).code, 0);
+    assert_ne!(window::window_pid(window::foreground()), p.app_pid());
+    let r = p.run(&["window", "activate"]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert_ne!(r.out["how"], "AlreadyFront", "{}", r.out);
+    assert_eq!(front(), "pokit fixture - second", "{}", r.out);
+
+    // A page that does not answer cannot be placed: the main window comes instead, and says why.
+    assert_eq!(other.run(&["window", "activate"]).code, 0);
+    let stall = "setTimeout(() => { const end = performance.now() + 4000; \
+                 while (performance.now() < end) {} }, 0); true";
+    assert_eq!(p.run(&["eval", stall]).code, 0);
+    let r = p.run(&["window", "activate"]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert_eq!(r.out["window"], "main", "{}", r.out);
+    assert!(r.out["page_not_placed"].is_string(), "{}", r.out);
+    assert_eq!(
+        front(),
+        "pokit fixture",
+        "the main window did not come to the front"
+    );
+    std::thread::sleep(std::time::Duration::from_secs(4));
 }

@@ -270,22 +270,44 @@ mod win {
         }
     }
 
-    fn wait_frontmost(pid: u32) -> bool {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-        while !is_frontmost(pid) && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(20));
+    /// Whether the foreground window is `hwnd` or one of the windows it owns.
+    fn holds_front(hwnd: HWND) -> bool {
+        // SAFETY: plain queries on window handles.
+        let mut w = unsafe { GetForegroundWindow() };
+        while !w.is_invalid() {
+            if w == hwnd {
+                return true;
+            }
+            // SAFETY: as above.
+            match unsafe { GetWindow(w, GW_OWNER) } {
+                Ok(owner) => w = owner,
+                Err(_) => break,
+            }
         }
-        is_frontmost(pid)
+        false
     }
 
-    /// Brings the app's main window to the front, restoring it if minimized: `SetForegroundWindow`
-    /// first, then the same while attached to the foreground window's input queue. How it got
-    /// there, or `None` when Windows kept it back.
-    pub fn activate(pid: u32) -> Result<Option<Activation>, String> {
-        if is_frontmost(pid) {
+    /// Waits up to 500 ms for `hwnd` to hold the foreground.
+    fn wait_front(hwnd: HWND) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        while !holds_front(hwnd) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        holds_front(hwnd)
+    }
+
+    /// Brings `window` of the app, or its main window when `None`, to the front, restoring it if
+    /// minimized: `SetForegroundWindow` first, then the same while attached to the foreground
+    /// window's input queue. The window is in front when it or a window it owns is the
+    /// foreground window. How it got there, or `None` when Windows kept it back.
+    pub fn activate(pid: u32, window: Option<isize>) -> Result<Option<Activation>, String> {
+        let hwnd = match window {
+            Some(h) => HWND(h as *mut _),
+            None => app_window(pid).ok_or("the app has no visible window")?,
+        };
+        if holds_front(hwnd) {
             return Ok(Some(Activation::AlreadyFront));
         }
-        let hwnd = app_window(pid).ok_or("the app has no visible window")?;
         // SAFETY: every call takes a live window of the app or plain values.
         unsafe {
             if IsIconic(hwnd).as_bool() {
@@ -293,7 +315,7 @@ mod win {
             }
             let _ = SetForegroundWindow(hwnd);
         }
-        if wait_frontmost(pid) {
+        if wait_front(hwnd) {
             return Ok(Some(Activation::Plain));
         }
         // SAFETY: as above; the attachment is undone before returning.
@@ -308,7 +330,7 @@ mod win {
                 let _ = AttachThreadInput(ours, theirs, false);
             }
         }
-        Ok(wait_frontmost(pid).then_some(Activation::AttachInput))
+        Ok(wait_front(hwnd).then_some(Activation::AttachInput))
     }
 
     fn send(inputs: &[INPUT]) -> usize {

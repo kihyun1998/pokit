@@ -26,18 +26,35 @@ impl State {
         let pid = self.native_pid()?;
         *self.foreground_at_click.lock().unwrap() = None;
         let previous = crate::proc::foreground().1;
-        match blocking(move || crate::os_input::activate(pid)).await? {
-            Some(how) => Ok(fields! {
-                "frontmost" => true,
-                "how" => format!("{how:?}"),
-                "previous_pid" => previous,
-            }),
+        let placed = self.current_page_window(pid).await;
+        let window = placed.as_ref().ok().copied();
+        match blocking(move || crate::os_input::activate(pid, window)).await? {
+            Some(how) => {
+                let mut f = fields! {
+                    "frontmost" => true,
+                    "how" => format!("{how:?}"),
+                    "previous_pid" => previous,
+                    "window" => if window.is_some() { "page" } else { "main" },
+                };
+                if let Err(why) = placed {
+                    f.insert("page_not_placed".into(), json!(why.message));
+                }
+                Ok(f)
+            }
             None => Err(Failure::new(
                 Kind::GuardRefused,
                 "Windows did not let the app come to the front",
             )
             .with("foreground_pid", crate::proc::foreground().1)),
         }
+    }
+
+    /// The app's window that holds the current page, asking the page for no longer than
+    /// `PAGE_ANSWER`.
+    async fn current_page_window(&self, pid: u32) -> Result<isize, Failure> {
+        let (_, cdp) = self.current()?;
+        let page = self.page_box_within(&cdp, PAGE_ANSWER).await?;
+        self.page_window(pid, page).await
     }
 
     /// The launched app's process, for OS input; an attached session does not know it.
@@ -285,15 +302,29 @@ pub(super) async fn blocking<T: Send + 'static>(
         .map_err(Failure::from)
 }
 
+/// How long `window activate` waits for the page to say where it is.
+const PAGE_ANSWER: Duration = Duration::from_secs(1);
+
 /// How long `window move` and `window resize` wait for the page to follow its window.
 const PLACE_SETTLE: Duration = Duration::from_secs(3);
 
 impl State {
     /// Where the current page is on the screen and how big, as it reports itself.
     async fn page_box(&self, cdp: &crate::cdp::Cdp) -> Result<crate::window::PageBox, Failure> {
-        let v = super::commands::evaluate(
+        self.page_box_within(cdp, super::commands::EVALUATE_TIMEOUT)
+            .await
+    }
+
+    /// `page_box`, waiting no longer than `timeout` for the page to answer.
+    async fn page_box_within(
+        &self,
+        cdp: &crate::cdp::Cdp,
+        timeout: Duration,
+    ) -> Result<crate::window::PageBox, Failure> {
+        let v = super::commands::evaluate_within(
             cdp,
             "[screenX, screenY, innerWidth, innerHeight, devicePixelRatio]",
+            timeout,
         )
         .await?;
         let n = |i: usize| {
