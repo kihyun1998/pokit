@@ -47,8 +47,13 @@ pub fn routes(command: &str) -> Option<serde_json::Value> {
         })),
         "hold" | "wheel" if cfg!(windows) => Some(json!({ "cdp": cdp, "os": os })),
         "drag" if cfg!(windows) => Some(json!({
-            "cdp": { "default": true, "takes_focus": false, "leaves_the_page": false },
-            "os": { "takes_focus": true, "needs": "the app in front: `window activate`", "leaves_the_page": true },
+            "cdp": { "default": true, "takes_focus": false, "leaves_the_page": false, "html5_drag": "always" },
+            "os": {
+                "takes_focus": true,
+                "needs": "the app in front: `window activate`",
+                "leaves_the_page": true,
+                "html5_drag": "only where the window's drop target takes drags without files: not under Tauri's default `dragDropEnabled`",
+            },
         })),
         _ => None,
     }
