@@ -385,6 +385,7 @@ fn a_window_capture_holds_the_apps_native_ui_and_nothing_of_other_apps() {
         plain.1
     );
     assert_eq!(out["windows"].as_array().map(Vec::len), Some(1), "{out}");
+    assert_eq!(out["window"], "page", "{out}");
 
     let cover = Cover::over(window::rect(main), 0);
     let (covered, _) = shot("covered.png");
@@ -420,4 +421,32 @@ fn a_window_capture_holds_the_apps_native_ui_and_nothing_of_other_apps() {
     );
     let r = p.run(&["capture", "#submit", "--window"]);
     assert_eq!(r.code, 2, "an element and --window together: {}", r.out);
+}
+
+#[test]
+fn a_window_capture_of_a_page_that_does_not_answer_is_of_the_main_window() {
+    let p = Pokit::launch_fixture("capture-stuck");
+    let stall = "setTimeout(() => { const end = performance.now() + 20000; \
+                 while (performance.now() < end) {} }, 0); true";
+    assert_eq!(p.run(&["eval", stall]).code, 0);
+    let out = p.home.join("stuck.png");
+    let started = std::time::Instant::now();
+    let r = p.run(&["capture", "--window", "--out", out.to_str().unwrap()]);
+    let took = started.elapsed();
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert!(took < Duration::from_secs(3), "took {took:?}: {}", r.out);
+    assert_eq!(r.out["window"], "main", "{}", r.out);
+    assert!(r.out["page_not_placed"].is_string(), "{}", r.out);
+    let shot = pixels(out.to_str().unwrap());
+    let white = shot
+        .2
+        .chunks(4)
+        .filter(|c| c[..3] == [255, 255, 255])
+        .count();
+    assert!(
+        white > (shot.0 * shot.1 / 3) as usize,
+        "the main window is not drawn in the capture ({white} white pixels of {}x{})",
+        shot.0,
+        shot.1
+    );
 }

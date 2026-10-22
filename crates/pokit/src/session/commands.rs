@@ -287,7 +287,7 @@ impl State {
                 crate::doctor::outcome(crate::doctor::checks(self.config.cdp_port).await)
             }
         };
-        if kind.resolves_elements() {
+        if kind.resolves_elements() && !matches!(request, Request::Capture { window: true, .. }) {
             self.release_objects().await;
         }
         let screenshot = match &outcome {

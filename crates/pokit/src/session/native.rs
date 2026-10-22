@@ -415,8 +415,8 @@ impl State {
         })
     }
 
-    /// `capture --window`: the window holding the current page with the app's own windows over
-    /// it, as a PNG.
+    /// `capture --window`: the window holding the current page, or the app's main window when the
+    /// page cannot be placed, with the app's own windows over it, as a PNG.
     pub(super) async fn capture_window_cmd(&self, out: Option<&str>) -> Outcome {
         let pid = self.app_pid.ok_or_else(|| {
             Failure::new(
@@ -424,10 +424,12 @@ impl State {
                 "capture --window needs the app's process, which only a launched session knows",
             )
         })?;
-        let (tid, cdp) = self.current()?;
-        self.ensure_ready(&tid, &cdp).await?;
-        let page = self.page_box(&cdp).await?;
-        let hwnd = self.page_window(pid, page).await?;
+        let placed = self.current_page_window(pid).await;
+        let hwnd = match &placed {
+            Ok(hwnd) => *hwnd,
+            Err(_) => crate::os_input::main_window(pid)
+                .ok_or_else(|| Failure::new(Kind::Error, "the app has no visible window"))?,
+        };
         let path = self.capture_path(out);
         let (shot, png) = blocking(move || {
             let shot = crate::window::capture(pid, hwnd)?;
@@ -450,12 +452,17 @@ impl State {
                         "rect": { "x": x, "y": y, "width": width, "height": height } })
             })
             .collect();
-        Ok(fields! {
+        let mut f = fields! {
             "path" => path.display().to_string(),
             "bytes" => png.len(),
             "width" => shot.width,
             "height" => shot.height,
             "windows" => windows,
-        })
+            "window" => if placed.is_ok() { "page" } else { "main" },
+        };
+        if let Err(why) = placed {
+            f.insert("page_not_placed".into(), json!(why.message));
+        }
+        Ok(f)
     }
 }
