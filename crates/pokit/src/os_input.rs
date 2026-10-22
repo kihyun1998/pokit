@@ -188,8 +188,8 @@ pub fn to_screen(origin: (i32, i32), css: (f64, f64), ratio: f64) -> (i32, i32) 
 
 #[cfg(windows)]
 pub use win::{
-    activate, click, drag, front_page, is_frontmost, key, release, render_widget, strokes, text,
-    top_level_windows, wheel,
+    activate, click, drag, front_page, is_frontmost, key, main_window, release, render_widget,
+    strokes, text, top_level_windows, wheel,
 };
 
 #[cfg(windows)]
@@ -254,6 +254,11 @@ mod win {
                 let r = place.rcNormalPosition;
                 i64::from(r.right - r.left) * i64::from(r.bottom - r.top)
             })
+    }
+
+    /// The app's main window, as `activate` brings it forward with no window named.
+    pub fn main_window(pid: u32) -> Option<isize> {
+        app_window(pid).map(|hwnd| hwnd.0 as isize)
     }
 
     /// Whether the foreground window belongs to process `pid`.
