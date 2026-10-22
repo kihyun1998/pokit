@@ -559,3 +559,36 @@ fn a_drag_out_of_the_window_through_the_os_opens_a_window_where_it_was_dropped()
         "no window opened for the drop"
     );
 }
+
+/// Holds `FRONT`, because the drags bring their fixture to the front. Each drag page opens with
+/// the app already in front, so that its window takes the focus, and is dragged in at once.
+#[test]
+fn an_os_drag_drops_an_html5_draggable_only_with_tauris_drag_handling_off() {
+    let _front = front();
+    let p = Pokit::launch_fixture("html5-drag-os");
+    let drag = |handler: bool| {
+        assert_eq!(p.run(&["window", "activate"]).code, 0);
+        p.open_drag_page(handler);
+        assert_eq!(p.run(&["window", "move", "--x", "40", "--y", "40"]).code, 0);
+        let r = p.run(&["drag", "#h5-drag", "--to", "#h5-drop", "--route", "os"]);
+        assert_eq!(r.code, 0, "handler {handler}: {}", r.out);
+        assert!(
+            eventually(3000, || p.drag_page_counts().0["dragend"] == 1),
+            "handler {handler}: the drag never ended: {:?}",
+            p.drag_page_counts()
+        );
+        p.drag_page_counts()
+    };
+
+    let (counts, result) = drag(false);
+    assert_eq!(result, "dropped h5-block", "{counts}");
+    assert_eq!(counts["drop"], 1, "{counts}");
+
+    let (counts, result) = drag(true);
+    assert_eq!(counts["dragstart"], 1, "{counts}");
+    assert!(
+        counts.get("dragover").is_none() && counts.get("drop").is_none(),
+        "the page saw the drag over it with the handler on: {counts}"
+    );
+    assert!(result.starts_with("ended at"), "{result}: {counts}");
+}

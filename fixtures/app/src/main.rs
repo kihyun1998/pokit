@@ -40,6 +40,29 @@ async fn open_dropped(app: tauri::AppHandle, x: f64, y: f64) -> Result<(), Strin
         .map_err(|e| e.to_string())
 }
 
+/// Opens the HTML5 drag page in a window of its own, `drag-on` with Tauri's drag-and-drop
+/// handling as it is by default, or `drag-off` with it turned off; does nothing if that window
+/// is already open.
+#[tauri::command]
+async fn open_drag_page(app: tauri::AppHandle, handler: bool) -> Result<(), String> {
+    let (label, state) = if handler {
+        ("drag-on", "on")
+    } else {
+        ("drag-off", "off")
+    };
+    if app.get_webview_window(label).is_some() {
+        return Ok(());
+    }
+    let mut builder = WebviewWindowBuilder::new(&app, label, WebviewUrl::App("drag.html".into()))
+        .title(format!("pokit fixture - drag {state}"))
+        .inner_size(480.0, 320.0)
+        .initialization_script(format!("window.__dragHandler = {state:?};"));
+    if !handler {
+        builder = builder.disable_drag_drop_handler();
+    }
+    builder.build().map(|_| ()).map_err(|e| e.to_string())
+}
+
 /// The fixture's tray icon with `--tray`, "pokit fixture tray": a left click shows it on the page, and its
 /// menu, on a right click, has Note from the tray and a disabled entry.
 fn tray(app: &tauri::App) -> tauri::Result<()> {
@@ -269,6 +292,7 @@ fn main() {
             backend_log,
             open_second,
             open_dropped,
+            open_drag_page,
             show_context_menu,
             pick_file,
             hide_webview_for
