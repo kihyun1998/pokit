@@ -607,9 +607,11 @@ impl State {
         require_focus: Option<&str>,
     ) -> Outcome {
         #[cfg(windows)]
-        if how.route == Route::Os {
-            self.refuse_unless_front().await?;
-        }
+        let front = if how.route == Route::Os {
+            Some(self.refuse_unless_front().await?)
+        } else {
+            None
+        };
         let (cdp, x, y) = match at {
             Some(ClickAt::Element(t)) => {
                 let (tid, cdp, obj) = self.resolve(t).await?;
@@ -644,7 +646,9 @@ impl State {
         };
         if how.route == Route::Os {
             #[cfg(windows)]
-            return self.os_click(&cdp, x, y, &how).await;
+            return self
+                .os_click(refused_unless_front(front)?, &cdp, x, y, &how)
+                .await;
             #[cfg(not(windows))]
             return Err(os_route_unsupported());
         }
@@ -849,9 +853,11 @@ impl State {
             ));
         }
         #[cfg(windows)]
-        if route == Route::Os {
-            self.refuse_unless_front().await?;
-        }
+        let front = if route == Route::Os {
+            Some(self.refuse_unless_front().await?)
+        } else {
+            None
+        };
         let (tid, cdp, obj) = self.resolve(from).await?;
         self.ensure_ready(&tid, &cdp).await?;
         let size = evaluate(&cdp, "[innerWidth, innerHeight]").await?;
@@ -960,7 +966,9 @@ impl State {
             }
             #[cfg(windows)]
             Route::Os => {
-                let mut f = self.os_drag(&cdp, path).await?;
+                let mut f = self
+                    .os_drag(refused_unless_front(front)?, &cdp, path)
+                    .await?;
                 f.extend(fields("os"));
                 Ok(f)
             }
@@ -986,9 +994,11 @@ impl State {
         route: Route,
     ) -> Outcome {
         #[cfg(windows)]
-        if route == Route::Os {
-            self.refuse_unless_front().await?;
-        }
+        let front = if route == Route::Os {
+            Some(self.refuse_unless_front().await?)
+        } else {
+            None
+        };
         let (cdp, x, y) = match (target, x, y) {
             (Some(t), _, _) => {
                 let (tid, cdp, obj) = self.resolve(t).await?;
@@ -1056,11 +1066,22 @@ impl State {
                 Ok(self.stamp(f, &[sent]))
             }
             #[cfg(windows)]
-            Route::Os => self.os_wheel(&cdp, x, y, notches).await,
+            Route::Os => {
+                self.os_wheel(refused_unless_front(front)?, &cdp, x, y, notches)
+                    .await
+            }
             #[cfg(not(windows))]
             Route::Os => Err(os_route_unsupported()),
         }
     }
+}
+
+/// The page's window an OS command was let through for.
+#[cfg(windows)]
+fn refused_unless_front(
+    front: Option<crate::os_input::PageWindow>,
+) -> Result<crate::os_input::PageWindow, Failure> {
+    front.ok_or_else(|| Failure::new(Kind::Error, "OS input was not checked against the front"))
 }
 
 /// Where a click lands: an element (a ref or selector), or a point in the page.

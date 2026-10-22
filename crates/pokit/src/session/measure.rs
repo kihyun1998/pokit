@@ -113,9 +113,9 @@ impl State {
             }
             #[cfg(windows)]
             Route::Os => {
-                let pid = self.refuse_unless_front().await?;
+                let page = self.refuse_unless_front().await?;
                 self.focus_for_input(hold.into, hold.require_focus).await?;
-                let sent = self.os_hold(pid, &press, hold.count, interval).await?;
+                let sent = self.os_hold(page, &press, hold.count, interval).await?;
                 let downs = sent.len().saturating_sub(1);
                 (sent, downs)
             }

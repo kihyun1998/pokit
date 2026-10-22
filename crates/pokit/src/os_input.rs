@@ -23,6 +23,14 @@ pub enum OsError {
     Failed(String),
 }
 
+/// The app's window that holds the page OS input is for: input goes ahead only while it is the
+/// foreground window.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PageWindow {
+    pub pid: u32,
+    pub hwnd: isize,
+}
+
 /// A mouse button and how many presses.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Click {
@@ -180,13 +188,13 @@ pub fn to_screen(origin: (i32, i32), css: (f64, f64), ratio: f64) -> (i32, i32) 
 
 #[cfg(windows)]
 pub use win::{
-    activate, click, drag, is_frontmost, key, release, render_widget, strokes, text,
+    activate, click, drag, front_page, is_frontmost, key, release, render_widget, strokes, text,
     top_level_windows, wheel,
 };
 
 #[cfg(windows)]
 mod win {
-    use super::{Activation, Click, OsError};
+    use super::{Activation, Click, OsError, PageWindow};
     use windows::Win32::Foundation::{HWND, LPARAM, POINT};
     use windows::Win32::Graphics::Gdi::ClientToScreen;
     use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
@@ -251,6 +259,22 @@ mod win {
     /// Whether the foreground window belongs to process `pid`.
     pub fn is_frontmost(pid: u32) -> bool {
         front_window(pid).is_ok()
+    }
+
+    /// The page's window, when it is the foreground window; otherwise why the input would go
+    /// elsewhere.
+    pub fn front_page(page: PageWindow) -> Result<HWND, OsError> {
+        let hwnd = HWND(page.hwnd as *mut _);
+        // SAFETY: a plain query.
+        if unsafe { GetForegroundWindow() } == hwnd {
+            return Ok(hwnd);
+        }
+        front_window(page.pid)?;
+        Err(OsError::NotFront(
+            "the app is in front, but not with this page: another of its windows or a dialog \
+             has the focus. Nothing was sent"
+                .into(),
+        ))
     }
 
     /// The foreground window, when it belongs to process `pid`.
@@ -366,8 +390,8 @@ mod win {
     }
 
     /// Sends physical key strokes, (code, key up), in one `SendInput` call, once the app is in front.
-    pub fn strokes(pid: u32, keys: &[(String, bool)]) -> Result<(), OsError> {
-        front_window(pid)?;
+    pub fn strokes(page: PageWindow, keys: &[(String, bool)]) -> Result<(), OsError> {
+        front_page(page)?;
         let inputs = keys
             .iter()
             .map(|(c, up)| physical_key(c, *up))
@@ -403,8 +427,8 @@ mod win {
     /// user's keyboard layout and input method treat it as they would the real key; one
     /// `SendInput` call, so no other input interleaves. If Windows takes only part of it, every
     /// modifier is released again.
-    pub fn key(pid: u32, code: &str, modifiers: u32) -> Result<(), OsError> {
-        front_window(pid)?;
+    pub fn key(page: PageWindow, code: &str, modifiers: u32) -> Result<(), OsError> {
+        front_page(page)?;
         let strokes = super::chord_strokes(code, modifiers);
         let inputs = strokes
             .iter()
@@ -427,8 +451,8 @@ mod win {
     }
 
     /// Types `text` as Unicode characters, a newline as the Enter key.
-    pub fn text(pid: u32, text: &str) -> Result<(), OsError> {
-        front_window(pid)?;
+    pub fn text(page: PageWindow, text: &str) -> Result<(), OsError> {
+        front_page(page)?;
         let mut inputs = Vec::new();
         for c in text.chars() {
             if c == '\n' {
@@ -512,11 +536,15 @@ mod win {
         }
     }
 
-    /// Moves the cursor to a point of the page in the app's front window (CSS pixels) and clicks
-    /// there, once the window under that point is that page's; the screen point, in physical
-    /// pixels.
-    pub fn click(pid: u32, css: (f64, f64), ratio: f64, how: Click) -> Result<(i32, i32), OsError> {
-        at_page_point(pid, css, ratio, |at| {
+    /// Moves the cursor to a point of the page (CSS pixels) and clicks there, once the window
+    /// under that point is the page's; the screen point, in physical pixels.
+    pub fn click(
+        page: PageWindow,
+        css: (f64, f64),
+        ratio: f64,
+        how: Click,
+    ) -> Result<(i32, i32), OsError> {
+        at_page_point(page, css, ratio, |at| {
             let mut inputs = vec![mouse(at.0, at.1, MOUSEEVENTF_MOVE, 0)];
             if !how.hover {
                 let (down, up) = if how.right {
@@ -533,12 +561,12 @@ mod win {
         })
     }
 
-    /// Presses the left button at the first point of `path` (page CSS pixels, in the app's front
-    /// window, which must be the page there), moves along the rest `step` apart, wherever they
+    /// Presses the left button at the first point of `path` (page CSS pixels; the window there
+    /// must be the page's), moves along the rest `step` apart, wherever they
     /// lead on the screen, and releases the button at the last; the last screen point. The
     /// button is released whatever goes wrong after it was pressed.
     pub fn drag(
-        pid: u32,
+        page: PageWindow,
         path: &[(f64, f64)],
         ratio: f64,
         step: std::time::Duration,
@@ -546,7 +574,7 @@ mod win {
         let Some((&first, rest)) = path.split_first() else {
             return Err(OsError::Failed("a drag needs a path".into()));
         };
-        let start = at_page_point(pid, first, ratio, |at| {
+        let start = at_page_point(page, first, ratio, |at| {
             vec![
                 mouse(at.0, at.1, MOUSEEVENTF_MOVE, 0),
                 mouse(at.0, at.1, MOUSEEVENTF_LEFTDOWN, 0),
@@ -586,12 +614,12 @@ mod win {
     /// Moves the cursor to a point of the page and turns the wheel `notches` notches, positive
     /// towards the user (scrolling down), as a hand would; the screen point.
     pub fn wheel(
-        pid: u32,
+        page: PageWindow,
         css: (f64, f64),
         ratio: f64,
         notches: i32,
     ) -> Result<(i32, i32), OsError> {
-        let at = at_page_point(pid, css, ratio, |at| {
+        let at = at_page_point(page, css, ratio, |at| {
             vec![mouse(at.0, at.1, MOUSEEVENTF_MOVE, 0)]
         })?;
         let delta = if notches > 0 {
@@ -616,10 +644,11 @@ mod win {
     /// One notch of the wheel, in the units `MOUSEEVENTF_WHEEL` takes (winuser.h `WHEEL_DELTA`).
     const WHEEL_DELTA: i32 = 120;
 
-    /// Places a page point (CSS pixels) on the screen in the app's front window, checks that the
-    /// page is what is there, and sends the mouse input `inputs_at` builds for that point.
+    /// Places a page point (CSS pixels) on the screen in the page's window, which must be the
+    /// foreground window, checks that the page is what is there, and sends the mouse input
+    /// `inputs_at` builds for that point.
     fn at_page_point(
-        pid: u32,
+        page: PageWindow,
         css: (f64, f64),
         ratio: f64,
         inputs_at: impl FnOnce((i32, i32)) -> Vec<INPUT>,
@@ -628,11 +657,9 @@ mod win {
         let previous =
             unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
         let result = (|| {
-            let root = front_window(pid)?;
+            let root = front_page(page)?;
             let widget = render_widget(root).ok_or_else(|| {
-                OsError::NotFront(
-                    "the app's front window holds no page (a dialog?); nothing was sent".into(),
-                )
+                OsError::NotFront("the page's window holds no page now; nothing was sent".into())
             })?;
             let mut corner = POINT { x: 0, y: 0 };
             // SAFETY: `widget` is a live window; `corner` is a valid in-out point.

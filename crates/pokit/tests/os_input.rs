@@ -649,3 +649,71 @@ fn window_activate_brings_forward_the_window_of_the_current_page() {
     );
     std::thread::sleep(std::time::Duration::from_secs(4));
 }
+
+/// Holds `FRONT`, because both fixtures are brought to the front in turn.
+#[test]
+fn os_input_goes_ahead_only_with_the_window_of_the_current_page_in_front() {
+    let _front = front();
+    let p = Pokit::launch_fixture("guard-page");
+    let other = Pokit::launch_fixture("guard-other");
+    assert_eq!(other.run(&["window", "activate"]).code, 0);
+    assert_eq!(p.run(&["click", "#open-second"]).code, 0);
+    assert!(eventually(5000, || p
+        .run(&["targets", "--select", "second"])
+        .code
+        == 0));
+    assert_eq!(p.run(&["window", "activate"]).code, 0);
+    assert_eq!(
+        window::title(window::foreground()),
+        "pokit fixture - second"
+    );
+
+    // The second window is in front, yet the main page also says it has the focus.
+    assert_eq!(p.run(&["targets", "--select", "0"]).code, 0);
+    assert_eq!(
+        p.run(&["eval", "document.hasFocus()"]).out["value"],
+        true,
+        "the main page did not report the focus; the case this test is about did not occur"
+    );
+    clear_events(&p);
+    assert_eq!(
+        p.run(&[
+            "eval",
+            "document.querySelector('#last-mouse').textContent = ''"
+        ])
+        .code,
+        0
+    );
+    let r = p.run(&["key", "KeyA", "--route", "os"]);
+    assert_eq!(
+        r.code, 6,
+        "a key went ahead with another window in front: {}",
+        r.out
+    );
+    let r = p.run(&["click", "#target", "--route", "os"]);
+    assert_eq!(
+        r.code, 6,
+        "a click went ahead with another window in front: {}",
+        r.out
+    );
+    assert!(events(&p, "key").is_empty(), "the main page got a key");
+    assert_eq!(p.read_text("#last-mouse"), "", "the main page got a click");
+
+    // The second page is the one in front, so its input goes ahead.
+    assert_eq!(p.run(&["targets", "--select", "second"]).code, 0);
+    let r = p.run(&["key", "KeyA", "--route", "os"]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert_eq!(r.out["delivery"], "confirmed", "{}", r.out);
+
+    // A page that does not answer cannot be placed, so nothing is sent.
+    let stall = "setTimeout(() => { const end = performance.now() + 4000; \
+                 while (performance.now() < end) {} }, 0); true";
+    assert_eq!(p.run(&["eval", stall]).code, 0);
+    let r = p.run(&["key", "KeyA", "--route", "os"]);
+    assert_eq!(
+        r.code, 6,
+        "a key went ahead to a page that could not be placed: {}",
+        r.out
+    );
+    std::thread::sleep(std::time::Duration::from_secs(4));
+}
