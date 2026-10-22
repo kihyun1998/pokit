@@ -273,7 +273,7 @@ impl Pokit {
     /// on the page every 5 ms: keys typed by someone other than the command `f` runs. `f` starts
     /// once the first of them has reached the page. The page then takes 100 ms over the first
     /// keydown that is not one of them, so held keys queue up while `f`'s command is still
-    /// waiting for its own.
+    /// waiting for its own. The held keys must still be arriving once `f` has returned.
     pub fn while_someone_types<R>(&self, f: impl FnOnce() -> R) -> R {
         let seen = "window.__otherKeys = 0; window.__slowOnce = false; \
                     if (!window.__someoneTypes) { window.__someoneTypes = true; \
@@ -285,7 +285,7 @@ impl Pokit {
         assert_eq!(self.run(&["eval", seen]).code, 0);
         let home = self.home.clone();
         let typist = std::thread::spawn(move || {
-            Pokit::on_home(home).run(&["hold", "Backquote", "--count", "600", "--interval", "5"])
+            Pokit::on_home(home).run(&["hold", "Backquote", "--count", "1000", "--interval", "5"])
         });
         let start = std::time::Instant::now();
         while self.run(&["eval", "window.__otherKeys"]).out["value"] == 0 {
@@ -297,6 +297,13 @@ impl Pokit {
         }
         assert_eq!(self.run(&["eval", "window.__slowOnce = true"]).code, 0);
         let r = f();
+        let others = || self.run(&["eval", "window.__otherKeys"]).out["value"].as_u64();
+        let after = others();
+        assert!(
+            eventually(500, || others() > after),
+            "the other typist had stopped before the command returned, so the command may have \
+             sent its keys with no one else typing; this is the test's own condition failing"
+        );
         let held = typist.join().unwrap();
         assert_eq!(held.code, 0, "the other keys: {}", held.out);
         r
