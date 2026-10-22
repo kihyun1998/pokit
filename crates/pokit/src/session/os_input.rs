@@ -6,7 +6,7 @@ use super::State;
 use crate::cdp::Cdp;
 use crate::chord;
 use crate::fields;
-use crate::os_input::OsError;
+use crate::os_input::{OsError, PageWindow};
 use crate::output::{Failure, Kind, Outcome};
 use std::time::Instant;
 
@@ -28,10 +28,11 @@ async fn os<T: Send + 'static>(
 }
 
 impl State {
-    /// Refuses OS input before anything happens on the page, unless the app is in front and the
-    /// current page has the input focus: another of the app's windows, or a dialog of its own,
-    /// in front would take the input instead.
-    pub(super) async fn refuse_unless_front(&self) -> Result<u32, Failure> {
+    /// Refuses OS input before anything happens on the page, unless the window that holds the
+    /// current page is the foreground window and the page has the input focus: another of the
+    /// app's windows, or a dialog of its own, in front would take the input instead. The page's
+    /// window, for the input to be checked against again as it is sent.
+    pub(super) async fn refuse_unless_front(&self) -> Result<PageWindow, Failure> {
         let pid = self.os_pid()?;
         if !crate::os_input::is_frontmost(pid) {
             return Err(failure(OsError::NotFront(
@@ -39,6 +40,14 @@ impl State {
                     .into(),
             )));
         }
+        let hwnd = self.current_page_window(pid).await.map_err(|why| {
+            failure(OsError::NotFront(format!(
+                "the window that holds this page could not be found ({}). Nothing was sent",
+                why.message
+            )))
+        })?;
+        let page = PageWindow { pid, hwnd };
+        os(move || crate::os_input::front_page(page).map(|_| ())).await?;
         let (_, cdp) = self.current()?;
         if evaluate(&cdp, "document.hasFocus()").await? != true {
             return Err(failure(OsError::NotFront(
@@ -47,7 +56,7 @@ impl State {
                     .into(),
             )));
         }
-        Ok(pid)
+        Ok(page)
     }
 
     pub(super) async fn os_key_cmd(
@@ -57,12 +66,12 @@ impl State {
         require_focus: Option<&str>,
     ) -> Outcome {
         let press = chord::parse_chord(chord).map_err(|e| Failure::new(Kind::Error, e))?;
-        let pid = self.refuse_unless_front().await?;
+        let page = self.refuse_unless_front().await?;
         let cdp = self.focus_then(into, require_focus, NOTE_KEYDOWNS).await?;
         let (code, modifiers) = (press.code.to_string(), press.modifiers);
         let downs = press.down_codes();
         let sent = Instant::now();
-        let pressed = os(move || crate::os_input::key(pid, &code, modifiers)).await;
+        let pressed = os(move || crate::os_input::key(page, &code, modifiers)).await;
         let delivery = check_delivery(&cdp, &downs, pressed.is_ok(), OS_KEYS_SETTLE_MS).await;
         pressed?;
         let mut f = fields! {
@@ -81,12 +90,12 @@ impl State {
         require_focus: Option<&str>,
     ) -> Outcome {
         let text = text.replace("\r\n", "\n").replace('\r', "\n");
-        let pid = self.refuse_unless_front().await?;
+        let page = self.refuse_unless_front().await?;
         let cdp = self.focus_then(into, require_focus, NOTE_KEYDOWNS).await?;
         let chars = text.chars().count();
         let downs = crate::os_input::text_down_codes(&text);
         let sent = Instant::now();
-        let typed = os(move || crate::os_input::text(pid, &text)).await;
+        let typed = os(move || crate::os_input::text(page, &text)).await;
         let delivery = check_delivery(&cdp, &downs, typed.is_ok(), OS_KEYS_SETTLE_MS).await;
         typed?;
         let mut f = fields! { "typed_chars" => chars, "route" => "os" };
@@ -94,9 +103,16 @@ impl State {
         Ok(self.stamp(f, &[sent]))
     }
 
-    /// Clicks at a page point; the caller has already refused it unless the app was in front.
-    pub(super) async fn os_click(&self, cdp: &Cdp, x: f64, y: f64, how: &ClickHow) -> Outcome {
-        let pid = self.os_pid()?;
+    /// Clicks at a page point in `page`'s window, which the caller has already checked was in
+    /// front.
+    pub(super) async fn os_click(
+        &self,
+        page: PageWindow,
+        cdp: &Cdp,
+        x: f64,
+        y: f64,
+        how: &ClickHow,
+    ) -> Outcome {
         let ratio = evaluate(cdp, "devicePixelRatio")
             .await?
             .as_f64()
@@ -107,7 +123,7 @@ impl State {
             hover: how.hover,
         };
         let sent = Instant::now();
-        let at = os(move || crate::os_input::click(pid, (x, y), ratio, click)).await?;
+        let at = os(move || crate::os_input::click(page, (x, y), ratio, click)).await?;
         let action = match (how.hover, how.right, how.double) {
             (true, _, _) => "hover",
             (_, true, _) => "right_click",
@@ -130,7 +146,7 @@ impl State {
     /// key pressed is released again, whichever app is in front by then.
     pub(super) async fn os_hold(
         &self,
-        pid: u32,
+        page: PageWindow,
         press: &chord::KeyPress,
         count: u32,
         interval: std::time::Duration,
@@ -144,14 +160,14 @@ impl State {
         let mut sent = Vec::with_capacity(count as usize + 1);
         let pressed = async {
             if !modifiers_down.is_empty() {
-                os(move || crate::os_input::strokes(pid, &modifiers_down)).await?;
+                os(move || crate::os_input::strokes(page, &modifiers_down)).await?;
             }
             let start = tokio::time::Instant::now();
             for n in 0..count {
                 tokio::time::sleep_until(start + interval * n).await;
                 sent.push(Instant::now());
                 let down = vec![key_down.clone()];
-                os(move || crate::os_input::strokes(pid, &down)).await?;
+                os(move || crate::os_input::strokes(page, &down)).await?;
             }
             tokio::time::sleep_until(start + interval * count).await;
             Ok::<_, Failure>(())
@@ -175,10 +191,15 @@ impl State {
         })
     }
 
-    /// Drags through the OS along a page path; the caller has already refused it unless the app
-    /// was in front. The button is held until the end, and released when the session ends.
-    pub(super) async fn os_drag(&self, cdp: &Cdp, path: Vec<(f64, f64)>) -> Outcome {
-        let pid = self.os_pid()?;
+    /// Drags through the OS along a page path from `page`'s window, which the caller has already
+    /// checked was in front. The button is held until the end, and released when the session
+    /// ends.
+    pub(super) async fn os_drag(
+        &self,
+        page: PageWindow,
+        cdp: &Cdp,
+        path: Vec<(f64, f64)>,
+    ) -> Outcome {
         let ratio = evaluate(cdp, "devicePixelRatio")
             .await?
             .as_f64()
@@ -186,7 +207,7 @@ impl State {
         *self.keys_down.lock().unwrap() = vec![crate::os_input::LEFT_BUTTON.to_string()];
         let sent = Instant::now();
         let step = super::commands::DRAG_STEP;
-        let dropped = os(move || crate::os_input::drag(pid, &path, ratio, step)).await;
+        let dropped = os(move || crate::os_input::drag(page, &path, ratio, step)).await;
         self.keys_down.lock().unwrap().clear();
         let at = dropped?;
         let f = fields! {
@@ -196,15 +217,22 @@ impl State {
         Ok(self.stamp(f, &[sent]))
     }
 
-    /// Turns the wheel through the OS over a page point.
-    pub(super) async fn os_wheel(&self, cdp: &Cdp, x: f64, y: f64, notches: i32) -> Outcome {
-        let pid = self.os_pid()?;
+    /// Turns the wheel through the OS over a page point in `page`'s window, which the caller has
+    /// already checked was in front.
+    pub(super) async fn os_wheel(
+        &self,
+        page: PageWindow,
+        cdp: &Cdp,
+        x: f64,
+        y: f64,
+        notches: i32,
+    ) -> Outcome {
         let ratio = evaluate(cdp, "devicePixelRatio")
             .await?
             .as_f64()
             .unwrap_or(1.0);
         let sent = Instant::now();
-        let at = os(move || crate::os_input::wheel(pid, (x, y), ratio, notches)).await?;
+        let at = os(move || crate::os_input::wheel(page, (x, y), ratio, notches)).await?;
         let f = fields! {
             "notches" => notches,
             "x" => x,

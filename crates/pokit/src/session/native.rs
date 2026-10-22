@@ -51,7 +51,7 @@ impl State {
 
     /// The app's window that holds the current page, asking the page for no longer than
     /// `PAGE_ANSWER`.
-    async fn current_page_window(&self, pid: u32) -> Result<isize, Failure> {
+    pub(super) async fn current_page_window(&self, pid: u32) -> Result<isize, Failure> {
         let (_, cdp) = self.current()?;
         let page = self.page_box_within(&cdp, PAGE_ANSWER).await?;
         self.page_window(pid, page).await
