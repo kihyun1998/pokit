@@ -1,6 +1,6 @@
 # Placing the app's windows
 
-How `window move` and `window resize` find the window that holds the current page and place it without bringing it to the front, on Windows (#5, #1 story 18). Code: `window::page_window`, `window::matching`, `window::outer_for_viewport`, `window::set`, `window::placed`, `window::area` (window.rs), `State::window_place_cmd` (session/native.rs), `os_input::top_level_windows`, `os_input::render_widget`.
+How `window move` and `window resize` (and `window activate`, [[sending-os-input]]) find the window that holds the current page and place it without bringing it to the front, on Windows (#5, #1 story 18). Code: `window::page_window`, `window::matching`, `window::outer_for_viewport`, `window::set`, `window::placed`, `window::area` (window.rs), `State::window_place_cmd` (session/native.rs), `os_input::top_level_windows`, `os_input::render_widget`.
 
 ## Design model
 
