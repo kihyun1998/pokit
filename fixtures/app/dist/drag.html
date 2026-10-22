@@ -6,11 +6,13 @@
   <style>
     body { font: 14px system-ui, sans-serif; margin: 16px; }
     #h5-drag { width: 120px; height: 40px; background: #cde; }
+    #h5-cancel { width: 120px; height: 24px; margin-top: 8px; background: #edc; }
     #h5-drop { width: 200px; height: 100px; margin-top: 24px; border: 2px dashed #999; }
   </style>
 </head>
 <body>
   <div id="h5-drag" draggable="true">Drag me (HTML5)</div>
+  <div id="h5-cancel" draggable="true">Cannot be dragged</div>
   <div id="h5-drop">Drop here</div>
   <p id="h5-result" role="status"></p>
   <script>
@@ -48,6 +50,8 @@
       e.dataTransfer.effectAllowed = 'move';
       $('h5-result').textContent = 'dragging';
     });
+    // `#h5-cancel` refuses to be dragged.
+    $('h5-cancel').addEventListener('dragstart', (e) => e.preventDefault());
     // The drop zone takes a move, and says what was dropped.
     $('h5-drop').addEventListener('dragover', (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
     $('h5-drop').addEventListener('drop', (e) => {

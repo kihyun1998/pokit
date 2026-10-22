@@ -328,6 +328,13 @@ fn capabilities_say_which_routes_take_focus() {
     }
     assert_eq!(c["type"]["routes"]["cdp"]["ime_composition"], true, "{c}");
     assert_eq!(c["type"]["routes"]["os"]["ime_composition"], false, "{c}");
+    assert_eq!(c["drag"]["routes"]["cdp"]["html5_drag"], "always", "{c}");
+    assert!(
+        c["drag"]["routes"]["os"]["html5_drag"]
+            .as_str()
+            .is_some_and(|s| s.contains("dragDropEnabled")),
+        "{c}"
+    );
     assert_eq!(
         c["window"]["actions"]["activate"]["takes_focus"], true,
         "{c}"
@@ -539,6 +546,11 @@ fn a_drag_out_of_the_window_through_the_os_opens_a_window_where_it_was_dropped()
     ]);
     assert_eq!(r.code, 0, "{}", r.out);
     assert!(
+        r.out["drag_events"].is_null(),
+        "a pointer drag reported HTML5 drag events: {}",
+        r.out
+    );
+    assert!(
         eventually(5000, || p.read_text("#drag-result").starts_with("out at")),
         "the page did not see the drop outside its window: {:?}",
         p.read_text("#drag-result")
@@ -561,18 +573,19 @@ fn a_drag_out_of_the_window_through_the_os_opens_a_window_where_it_was_dropped()
 
 /// Holds `FRONT`, because the drags bring their fixture to the front.
 #[test]
-fn an_os_drag_drops_an_html5_draggable_only_with_tauris_drag_handling_off() {
+fn an_os_html5_drag_that_never_reached_the_page_is_not_delivered() {
     let _front = front();
     let p = Pokit::launch_fixture("html5-drag-os");
     // Each drag page is placed apart from the other.
-    let drag = |handler: bool| {
+    let open = |handler: bool| {
         p.open_drag_page(handler);
         let at = if handler { "80" } else { "40" };
         assert_eq!(p.run(&["window", "move", "--x", at, "--y", at]).code, 0);
         let r = p.run(&["window", "activate"]);
         assert_eq!(r.out["window"], "page", "handler {handler}: {}", r.out);
-        let r = p.run(&["drag", "#h5-drag", "--to", "#h5-drop", "--route", "os"]);
-        assert_eq!(r.code, 0, "handler {handler}: {}", r.out);
+    };
+    let reset = || assert_eq!(p.run(&["eval", "location.reload(); true"]).code, 0);
+    let ended = |handler: bool| {
         assert!(
             eventually(3000, || p.drag_page_counts().0["dragend"] == 1),
             "handler {handler}: the drag never ended: {:?}",
@@ -581,17 +594,55 @@ fn an_os_drag_drops_an_html5_draggable_only_with_tauris_drag_handling_off() {
         p.drag_page_counts()
     };
 
-    let (counts, result) = drag(false);
+    // With Tauri's handling off, the drag reaches the page and is counted.
+    open(false);
+    let r = p.run(&["drag", "#h5-drag", "--to", "#h5-drop", "--route", "os"]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert_eq!(r.out["drag_events"]["dragstart"], 1, "{}", r.out);
+    assert!(r.out["drag_events"]["drag"].as_u64() > Some(0), "{}", r.out);
+    assert_eq!(r.out["drag_events"]["dragend"], 1, "{}", r.out);
+    let (counts, result) = ended(false);
     assert_eq!(result, "dropped h5-block", "{counts}");
-    assert_eq!(counts["drop"], 1, "{counts}");
 
-    let (counts, result) = drag(true);
-    assert_eq!(counts["dragstart"], 1, "{counts}");
-    assert!(
-        counts.get("dragover").is_none() && counts.get("drop").is_none(),
-        "the page saw the drag over it with the handler on: {counts}"
+    // A drag the page cancels is no drag at all, and not a failure.
+    reset();
+    let r = p.run(&["drag", "#h5-cancel", "--to", "#h5-drop", "--route", "os"]);
+    assert_eq!(
+        r.code, 0,
+        "a cancelled dragstart failed the drag: {}",
+        r.out
     );
-    assert!(result.starts_with("ended at"), "{result}: {counts}");
+    assert!(r.out["drag_events"].is_null(), "{}", r.out);
+
+    // With it on, the page starts the drag and sees nothing of it: not delivered.
+    open(true);
+    let r = p.run(&["drag", "#h5-drag", "--to", "#h5-drop", "--route", "os"]);
+    assert_eq!(r.code, 9, "{}", r.out);
+    assert_eq!(r.out["error"]["kind"], "not_delivered", "{}", r.out);
+    let events = &r.out["error"]["drag_events"];
+    assert_eq!(events["dragstart"], 1, "{}", r.out);
+    assert_eq!(events["drag"], 0, "{}", r.out);
+    assert_eq!(events["dragend"], 1, "{}", r.out);
+    let message = r.out["error"]["message"].as_str().unwrap();
+    for named in ["--route cdp", "--steps", "dragDropEnabled"] {
+        assert!(message.contains(named), "{named}: {message}");
+    }
+    let (counts, _) = ended(true);
+    assert!(counts.get("drop").is_none(), "{counts}");
+
+    // Out of the window it ends where it was dropped, which is all that is checked there.
+    reset();
+    let width = p.run(&["eval", "innerWidth"]).out["value"]
+        .as_f64()
+        .unwrap();
+    let beyond = format!("{}", width + 150.0);
+    let r = p.run(&[
+        "drag", "#h5-drag", "--to-x", &beyond, "--to-y", "40", "--route", "os",
+    ]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert_eq!(r.out["drag_events"]["dragend"], 1, "{}", r.out);
+    let (_, result) = ended(true);
+    assert!(result.starts_with("out at"), "{result}");
 }
 
 /// Holds `FRONT`, because both fixtures are brought to the front in turn.

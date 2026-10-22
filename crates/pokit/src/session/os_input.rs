@@ -17,6 +17,79 @@ fn failure(e: OsError) -> Failure {
     }
 }
 
+/// Counts, in `window.__pokitDrags`, the trusted HTML5 `dragstart`, `drag` and `dragend` events
+/// the page raises, and each `dragstart` the page cancelled; replaces a previous count.
+const NOTE_DRAGS: &str = "const old = window.__pokitDrags; \
+    if (old) for (const [t, h] of old.hs) window.removeEventListener(t, h, true); \
+    const c = { dragstart: 0, cancelled: 0, drag: 0, dragend: 0, hs: [] }; \
+    for (const t of ['dragstart', 'drag', 'dragend']) { \
+      const h = (e) => { if (!e.isTrusted) return; c[t] += 1; \
+        if (t === 'dragstart') setTimeout(() => { if (e.defaultPrevented) c.cancelled += 1; }, 0); }; \
+      window.addEventListener(t, h, true); c.hs.push([t, h]); } \
+    window.__pokitDrags = c; true";
+
+/// How long the count waits for a drag the page started to end once the button is up.
+const DRAG_SETTLE_MS: u64 = 1000;
+
+/// Reads and removes the count `NOTE_DRAGS` started, once a drag the page started has ended or
+/// `DRAG_SETTLE_MS` has passed: `{dragstart, cancelled, drag, dragend}`, or `None` when the
+/// count went with its document or the page could not be read.
+async fn read_drags(cdp: &Cdp) -> Option<serde_json::Value> {
+    let read = format!(
+        "new Promise((resolve) => {{ const c = window.__pokitDrags; \
+         if (!c) {{ resolve(null); return; }} \
+         const until = performance.now() + {DRAG_SETTLE_MS}; \
+         const done = () => {{ for (const [t, h] of c.hs) window.removeEventListener(t, h, true); \
+           delete window.__pokitDrags; \
+           resolve({{ dragstart: c.dragstart, cancelled: c.cancelled, drag: c.drag, dragend: c.dragend }}); }}; \
+         const poll = () => (c.dragstart === c.cancelled || c.dragend > 0 || performance.now() >= until) \
+           ? setTimeout(done, 0) : setTimeout(poll, 5); \
+         setTimeout(poll, 0); }})"
+    );
+    evaluate(cdp, &read).await.ok().filter(|v| !v.is_null())
+}
+
+/// The result's `drag_events` and `delivery` for an OS drag, or not delivered when the page
+/// started an HTML5 drag, dropped inside it, that never reached it.
+fn drag_delivery(
+    drags: Option<serde_json::Value>,
+    drops_inside: bool,
+) -> Result<crate::output::Fields, Failure> {
+    let Some(v) = drags else {
+        return Ok(fields! {
+            "drag_events" => serde_json::Value::Null,
+            "delivery" => "unverified: the page changed while dragging",
+        });
+    };
+    let n = |k: &str| v[k].as_u64().unwrap_or(0);
+    if n("dragstart") <= n("cancelled") {
+        return Ok(fields! { "drag_events" => serde_json::Value::Null });
+    }
+    let events = serde_json::json!({
+        "dragstart": n("dragstart"),
+        "drag": n("drag"),
+        "dragend": n("dragend"),
+    });
+    if n("dragend") == 0 {
+        return Ok(fields! {
+            "drag_events" => events,
+            "delivery" => format!("unverified: the page's drag had not ended {DRAG_SETTLE_MS} ms after the button was let go"),
+        });
+    }
+    if drops_inside && n("drag") == 0 {
+        return Err(Failure::new(
+            Kind::NotDelivered,
+            "the page started an HTML5 drag and saw none of it: no `drag` event came between its \
+             dragstart and dragend, so nothing was dropped. Either the window's drop target \
+             ignores drags that carry no files (Tauri's `dragDropEnabled`, on by default, does; \
+             turning it off loses the app's own file-drop events), or the path was too short \
+             (raise --steps). `--route cdp` reaches HTML5 drag and drop either way",
+        )
+        .with("drag_events", events));
+    }
+    Ok(fields! { "drag_events" => events, "delivery" => "confirmed" })
+}
+
 /// Runs an OS input call off the async runtime.
 async fn os<T: Send + 'static>(
     f: impl FnOnce() -> Result<T, OsError> + Send + 'static,
@@ -193,13 +266,17 @@ impl State {
 
     /// Drags through the OS along a page path from `page`'s window, which the caller has already
     /// checked was in front. The button is held until the end, and released when the session
-    /// ends.
+    /// ends. The HTML5 drag events the page raised are counted: a drag the page started and
+    /// dropped inside it (`drops_inside`) with no `drag` event between its start and end never
+    /// reached the page, and fails as not delivered.
     pub(super) async fn os_drag(
         &self,
         page: PageWindow,
         cdp: &Cdp,
         path: Vec<(f64, f64)>,
+        drops_inside: bool,
     ) -> Outcome {
+        evaluate(cdp, NOTE_DRAGS).await?;
         let ratio = evaluate(cdp, "devicePixelRatio")
             .await?
             .as_f64()
@@ -209,11 +286,13 @@ impl State {
         let step = super::commands::DRAG_STEP;
         let dropped = os(move || crate::os_input::drag(page, &path, ratio, step)).await;
         self.keys_down.lock().unwrap().clear();
+        let drags = read_drags(cdp).await;
         let at = dropped?;
-        let f = fields! {
+        let mut f = fields! {
             "screen" => serde_json::json!({ "x": at.0, "y": at.1 }),
             "device_pixel_ratio" => ratio,
         };
+        f.extend(drag_delivery(drags, drops_inside)?);
         Ok(self.stamp(f, &[sent]))
     }
 

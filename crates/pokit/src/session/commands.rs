@@ -966,9 +966,8 @@ impl State {
             }
             #[cfg(windows)]
             Route::Os => {
-                let mut f = self
-                    .os_drag(refused_unless_front(front)?, &cdp, path)
-                    .await?;
+                let page = refused_unless_front(front)?;
+                let mut f = self.os_drag(page, &cdp, path, inside(end)).await?;
                 f.extend(fields("os"));
                 Ok(f)
             }
