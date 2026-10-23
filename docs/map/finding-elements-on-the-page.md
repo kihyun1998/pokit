@@ -1,6 +1,6 @@
 # Finding elements on the page
 
-How a command that takes an element (a selector or a snapshot ref) turns it into a remote object on the page, and how those objects are released, on Windows over CDP. Code: `State::resolve`, `object_group`, `Resolved`, `RESOLVED`, `State::release_objects`, `State::handle` (session/commands.rs).
+How a command that takes an element (a selector or a snapshot ref) turns it into a remote object on the page, and how those objects are released, on Windows over CDP. Through the macOS plugin there is no remote object: `read` finds and reads in one evaluation ([[reaching-the-page-through-the-plugin]]). Code: `State::resolve`, `object_group`, `Resolved`, `RESOLVED`, `State::release_objects`, `State::handle` (session/commands.rs).
 
 ## Design model
 

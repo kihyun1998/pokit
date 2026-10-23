@@ -87,6 +87,100 @@ fn eval_runs_in_the_page_and_close_ends_the_app() {
 }
 
 #[test]
+fn read_by_selector_returns_the_fields_windows_does() {
+    let p = Pokit::launch_fixture("mac-read");
+    let r = p.run(&[
+        "eval",
+        "document.querySelector('#name').value = 'kim'; \
+         document.querySelector('#result').textContent = ' Hello, kim '",
+    ]);
+    assert_eq!(r.code, 0, "{}", r.out);
+
+    let r = p.run(&["read", "#name"]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert_eq!(r.out["engine"], "plugin", "{}", r.out);
+    assert_eq!(r.out["tag"], "input", "{}", r.out);
+    assert_eq!(r.out["value"], "kim", "{}", r.out);
+    assert_eq!(
+        r.out["state"],
+        json!({ "focused": false, "disabled": false, "checked": false, "visible": true }),
+        "{}",
+        r.out
+    );
+
+    let r = p.run(&["read", "#result"]);
+    assert_eq!(r.out["text"], "Hello, kim", "{}", r.out);
+    assert_eq!(r.out["value"], Value::Null, "{}", r.out);
+    assert_eq!(r.out["state"]["checked"], Value::Null, "{}", r.out);
+
+    let r = p.run(&["read", "#nothing-here"]);
+    assert_eq!(r.code, 5, "{}", r.out);
+    assert_eq!(r.out["error"]["kind"], "not_found", "{}", r.out);
+
+    let r = p.run(&["read", "[[broken"]);
+    assert_eq!(r.code, 1, "{}", r.out);
+    assert_eq!(r.out["error"]["kind"], "error", "{}", r.out);
+    assert!(
+        r.out["error"]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("invalid selector `[[broken`"),
+        "{}",
+        r.out
+    );
+
+    let r = p.run(&["read", "e12"]);
+    assert_eq!(r.code, UNSUPPORTED, "{}", r.out);
+    assert!(
+        r.out["error"]["message"].as_str().unwrap().contains("#14"),
+        "{}",
+        r.out
+    );
+}
+
+#[test]
+fn wait_holds_until_an_element_appears_and_times_out_on_one_that_never_comes() {
+    let p = Pokit::launch_fixture("mac-wait");
+    let home = p.home.clone();
+    let waiter = std::thread::spawn(move || {
+        let w = Pokit::on_home(home);
+        w.run(&["wait", "--selector", "#on-demand", "--for", "30000"])
+    });
+    std::thread::sleep(Duration::from_millis(1000));
+    assert!(
+        !waiter.is_finished(),
+        "wait returned before #on-demand existed"
+    );
+    let r = p.run(&["eval", "document.querySelector('#show-now').click()"]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    let r = waiter.join().unwrap();
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert_eq!(r.out["engine"], "plugin", "{}", r.out);
+
+    assert_eq!(p.run(&["wait", "--text", "Here"]).code, 0);
+    assert_eq!(p.run(&["wait", "--expr", "1 + 1 === 2"]).code, 0);
+
+    let start = std::time::Instant::now();
+    let r = p.run(&["wait", "--selector", "#never", "--for", "1000"]);
+    assert_eq!(r.code, 4, "{}", r.out);
+    assert_eq!(r.out["error"]["kind"], "timeout");
+    assert!(
+        start.elapsed() < Duration::from_secs(20),
+        "wait ignored its own timeout and ran into the command's"
+    );
+
+    let r = p.run(&[
+        "wait",
+        "--expr",
+        "this is not ( javascript",
+        "--for",
+        "8000",
+    ]);
+    assert_eq!(r.code, 1, "{}", r.out);
+    assert_eq!(r.out["error"]["kind"], "js_error", "{}", r.out);
+}
+
+#[test]
 fn launch_reports_the_session_and_the_run_record_keeps_each_command() {
     let mut p = Pokit::launch_fixture("mac-record");
     let launched = p.launched.clone().unwrap();
@@ -279,7 +373,7 @@ fn a_build_without_the_feature_has_no_plugin_and_opens_no_port() {
 fn commands_not_built_on_macos_exit_unsupported() {
     let p = Pokit::new("mac-unsupported");
     let caps = p.run(&["capabilities"]).out;
-    for supported in ["launch", "close", "eval", "capabilities"] {
+    for supported in ["launch", "close", "eval", "read", "wait", "capabilities"] {
         assert_eq!(
             caps["commands"][supported]["supported"], true,
             "{supported}: {caps}"
