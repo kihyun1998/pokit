@@ -201,3 +201,55 @@ fn closing_an_attached_session_ends_its_trace() {
     );
     assert_eq!(fresh.run(&["trace", "stop"]).code, 0);
 }
+
+/// The most memory the process `pid` has held in its working set so far, in bytes.
+fn peak_working_set(pid: u64) -> u64 {
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command"])
+        .arg(format!("(Get-Process -Id {pid}).PeakWorkingSet64"))
+        .output()
+        .expect("powershell did not start");
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("no working set for {pid}: {text}"))
+}
+
+#[test]
+fn stopping_a_long_trace_holds_less_memory_than_the_trace_itself() {
+    let p = Pokit::launch_fixture("trace-long");
+    let session: Value =
+        serde_json::from_slice(&std::fs::read(p.home.join("session.json")).unwrap()).unwrap();
+    let pid = session["pid"].as_u64().unwrap();
+    assert_eq!(p.run(&["trace", "start"]).code, 0);
+    let r = p.run(&[
+        "hold",
+        "KeyA",
+        "--count",
+        "1000",
+        "--interval",
+        "20",
+        "--into",
+        "#stall",
+    ]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    let t = p.run(&["trace", "stop"]);
+    assert_eq!(t.code, 0, "{}", t.out);
+
+    let size = std::fs::metadata(t.out["path"].as_str().unwrap())
+        .unwrap()
+        .len();
+    let peak = peak_working_set(pid);
+    eprintln!(
+        "trace {size} bytes, {} events; session peak {peak} bytes",
+        t.out["events"]
+    );
+    assert!(
+        size > 50 << 20,
+        "the trace is too small to show anything: {size} bytes"
+    );
+    assert!(
+        peak < size,
+        "the session peaked at {peak} bytes, more than the {size}-byte trace it stopped"
+    );
+}

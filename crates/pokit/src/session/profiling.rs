@@ -6,7 +6,9 @@ use crate::cdp::Cdp;
 use crate::fields;
 use crate::output::{Failure, Fields, Kind, Outcome};
 use base64::Engine as _;
-use serde_json::{json, Value};
+use serde_json::json;
+use std::fs::File;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -81,15 +83,16 @@ impl State {
                 "the trace came back without a stream",
             ));
         };
-        let bytes = read_stream(&cdp, handle).await?;
         let path = self.record_file("trace", "json");
-        write(&path, &bytes)?;
+        let mut file = File::create(&path).map_err(|e| write_failed(&path, e))?;
+        let read = read_stream(&cdp, handle, &mut file, &path).await;
+        drop(file);
+        if read.is_err() {
+            let _ = std::fs::remove_file(&path);
+        }
+        read?;
         check_same_document(&cdp, &rec, &path).await?;
-        let trace: Value = serde_json::from_slice(&bytes)
-            .map_err(|e| Failure::new(Kind::Error, format!("the trace is not JSON: {e}")))?;
-        let events = crate::trace::events(&trace);
-        let mut f = crate::trace::summarize(events);
-        f.insert("events".into(), json!(events.len()));
+        let mut f = summarize_trace(path.clone()).await?;
         f.insert("data_loss".into(), done["dataLossOccurred"].clone());
         Ok(with_file(f, &path, &rec))
     }
@@ -189,18 +192,36 @@ fn with_file(mut f: Fields, path: &Path, rec: &Recording) -> Fields {
 }
 
 fn write(path: &Path, bytes: &[u8]) -> Result<(), Failure> {
-    std::fs::write(path, bytes).map_err(|e| {
-        Failure::new(
-            Kind::Error,
-            format!("could not write {}: {e}", path.display()),
-        )
-    })
+    std::fs::write(path, bytes).map_err(|e| write_failed(path, e))
 }
 
-/// Reads a protocol stream to its end; the stream is closed whether or not reading succeeds.
-async fn read_stream(cdp: &Cdp, handle: &str) -> Result<Vec<u8>, Failure> {
+fn write_failed(path: &Path, e: std::io::Error) -> Failure {
+    Failure::new(
+        Kind::Error,
+        format!("could not write {}: {e}", path.display()),
+    )
+}
+
+/// `trace::summarize` over the trace saved at `path`, off the async workers.
+async fn summarize_trace(path: PathBuf) -> Result<Fields, Failure> {
+    tokio::task::spawn_blocking(move || {
+        let file = File::open(&path).map_err(|e| {
+            Failure::new(
+                Kind::Error,
+                format!("could not read {}: {e}", path.display()),
+            )
+        })?;
+        crate::trace::summarize(file)
+            .map_err(|e| Failure::new(Kind::Error, format!("the trace is not JSON: {e}")))
+    })
+    .await
+    .map_err(|e| Failure::new(Kind::Error, format!("summarising the trace failed: {e}")))?
+}
+
+/// Reads a protocol stream to its end into `out`, which is the file at `path`; the stream is
+/// closed whether or not reading succeeds.
+async fn read_stream(cdp: &Cdp, handle: &str, out: &mut File, path: &Path) -> Result<(), Failure> {
     let read = async {
-        let mut bytes = Vec::new();
         loop {
             let chunk = cdp
                 .call("IO.read", json!({ "handle": handle, "size": 1 << 20 }))
@@ -212,16 +233,17 @@ async fn read_stream(cdp: &Cdp, handle: &str) -> Result<Vec<u8>, Failure> {
                     .map_err(|e| {
                         Failure::new(Kind::Error, format!("the trace stream is not base64: {e}"))
                     })?;
-                bytes.extend(decoded);
+                out.write_all(&decoded)
             } else {
-                bytes.extend(data.as_bytes());
+                out.write_all(data.as_bytes())
             }
+            .map_err(|e| write_failed(path, e))?;
             if chunk["eof"] == true {
-                return Ok::<_, Failure>(bytes);
+                return Ok::<_, Failure>(());
             }
         }
     };
-    let bytes = read.await;
+    let read = read.await;
     let _ = cdp.call("IO.close", json!({ "handle": handle })).await;
-    bytes
+    read
 }
