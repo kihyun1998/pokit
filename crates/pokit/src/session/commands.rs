@@ -16,8 +16,45 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// The object group every remote object pokit resolves belongs to, released after each command.
+/// The prefix of the object group each command's remote objects belong to.
 const OBJECT_GROUP: &str = "pokit";
+
+/// The number the next command's object group ends in.
+static NEXT_GROUP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// The remote objects of the command being handled: its own object group, and the targets it
+/// resolved objects on, which are the only ones released after it.
+struct Resolved {
+    group: String,
+    targets: std::sync::Mutex<Vec<String>>,
+}
+
+impl Resolved {
+    fn new() -> Self {
+        let n = NEXT_GROUP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Resolved {
+            group: format!("{OBJECT_GROUP}-{n}"),
+            targets: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+}
+
+tokio::task_local! {
+    static RESOLVED: Resolved;
+}
+
+/// The object group of the command being handled, noting `target` as one it resolved on.
+fn object_group(target: &str) -> String {
+    RESOLVED
+        .try_with(|r| {
+            let mut targets = r.targets.lock().unwrap();
+            if !targets.iter().any(|t| t == target) {
+                targets.push(target.to_string());
+            }
+            r.group.clone()
+        })
+        .unwrap_or_else(|_| OBJECT_GROUP.to_string())
+}
 
 impl State {
     pub(super) async fn handle(self: &Arc<Self>, request: Request) -> (i32, Value) {
@@ -38,7 +75,10 @@ impl State {
         } else {
             None
         };
-        let outcome = match &request {
+        let outcome =
+            RESOLVED
+                .scope(Resolved::new(), async {
+                    let outcome = match &request {
             _ if self.plugin.is_some() && !crate::support::plugin_answers(kind.name()) => {
                 Err(crate::support::refused(kind.name()))
             }
@@ -287,9 +327,10 @@ impl State {
                 crate::doctor::outcome(crate::doctor::checks(self.config.cdp_port).await)
             }
         };
-        if kind.resolves_elements() && !matches!(request, Request::Capture { window: true, .. }) {
-            self.release_objects().await;
-        }
+                    self.release_objects().await;
+                    outcome
+                })
+                .await;
         let screenshot = match &outcome {
             Err(_) if kind.screenshots_failure() && request.secret().is_none() => {
                 self.failure_screenshot().await
@@ -325,20 +366,26 @@ impl State {
         (code, out)
     }
 
-    /// Releases every remote object pokit resolved during a command, on every page.
+    /// Releases the remote objects the command being handled resolved, on the targets it
+    /// resolved them on.
     async fn release_objects(&self) {
-        let cdps: Vec<Arc<Cdp>> = self
-            .targets
-            .lock()
-            .unwrap()
-            .values()
-            .map(|t| t.cdp.clone())
-            .collect();
+        let Ok((group, resolved)) =
+            RESOLVED.try_with(|r| (r.group.clone(), r.targets.lock().unwrap().clone()))
+        else {
+            return;
+        };
+        let cdps: Vec<Arc<Cdp>> = {
+            let targets = self.targets.lock().unwrap();
+            resolved
+                .iter()
+                .filter_map(|id| targets.get(id).map(|t| t.cdp.clone()))
+                .collect()
+        };
         for cdp in cdps {
             let _ = cdp
                 .call(
                     "Runtime.releaseObjectGroup",
-                    json!({ "objectGroup": OBJECT_GROUP }),
+                    json!({ "objectGroup": group }),
                 )
                 .await;
         }
@@ -433,7 +480,7 @@ impl State {
             let obj = cdp
                 .call(
                     "DOM.resolveNode",
-                    json!({ "backendNodeId": node, "objectGroup": OBJECT_GROUP }),
+                    json!({ "backendNodeId": node, "objectGroup": object_group(&tid) }),
                 )
                 .await
                 .map_err(|_| {
@@ -451,7 +498,7 @@ impl State {
         let r = cdp
             .call(
                 "Runtime.evaluate",
-                json!({ "expression": expr, "objectGroup": OBJECT_GROUP }),
+                json!({ "expression": expr, "objectGroup": object_group(&tid) }),
             )
             .await?;
         if let Some(e) = r.get("exceptionDetails") {
@@ -1459,5 +1506,39 @@ mod tests {
             (3, 1)
         );
         assert_eq!(tally(&codes(&["", ""]), &codes(&["", "KeyX"])), (1, 1));
+    }
+}
+
+#[cfg(test)]
+mod object_groups {
+    use super::{object_group, Resolved, OBJECT_GROUP, RESOLVED};
+
+    /// The group and targets `object_group` noted for the command running in `scope`.
+    async fn noted(on: &'static [&'static str]) -> (String, Vec<String>) {
+        RESOLVED
+            .scope(Resolved::new(), async {
+                let mut group = String::new();
+                for t in on {
+                    group = object_group(t);
+                    tokio::task::yield_now().await;
+                }
+                let targets = RESOLVED.with(|r| r.targets.lock().unwrap().clone());
+                (group, targets)
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn two_commands_at_once_have_groups_and_targets_of_their_own() {
+        let (a, b) = tokio::join!(noted(&["page-1", "page-2", "page-1"]), noted(&["page-1"]));
+        assert_ne!(a.0, b.0, "two commands shared an object group");
+        assert!(a.0.starts_with(OBJECT_GROUP) && b.0.starts_with(OBJECT_GROUP));
+        assert_eq!(a.1, vec!["page-1", "page-2"]);
+        assert_eq!(b.1, vec!["page-1"]);
+    }
+
+    #[test]
+    fn outside_a_command_the_group_is_the_shared_one() {
+        assert_eq!(object_group("page-1"), OBJECT_GROUP);
     }
 }

@@ -911,3 +911,54 @@ fn a_drag_on_cdp_moves_the_pointer_within_the_page_and_refuses_to_leave_it() {
     ]);
     assert_eq!(r.code, 2, "a drag of over 10 s: {}", r.out);
 }
+
+#[test]
+fn an_element_command_does_not_wait_on_another_page_that_does_not_answer() {
+    let p = Pokit::launch_fixture("release-stuck");
+    assert_eq!(p.run(&["click", "#open-second"]).code, 0);
+    assert!(eventually(5000, || p
+        .run(&["targets", "--select", "second"])
+        .code
+        == 0));
+    let stall = "setTimeout(() => { const end = performance.now() + 40000; \
+                 while (performance.now() < end) {} }, 0); true";
+    assert_eq!(p.run(&["eval", stall]).code, 0);
+    assert_eq!(p.run(&["targets", "--select", "0"]).code, 0);
+    let started = std::time::Instant::now();
+    let r = p.run(&["read", "#name"]);
+    let took = started.elapsed();
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert!(
+        took < std::time::Duration::from_secs(2),
+        "a read on the main page took {took:?} with the second page stuck"
+    );
+}
+
+#[test]
+fn the_objects_an_element_command_resolved_are_released_on_its_page() {
+    let p = Pokit::launch_fixture("release-own");
+    // An element held only by the page and a WeakRef.
+    let made = "(() => { const el = document.createElement('p'); el.id = 'gone'; \
+                el.textContent = 'gone'; document.body.append(el); \
+                window.__gone = new WeakRef(el); return true; })()";
+    assert_eq!(p.run(&["eval", made]).code, 0);
+    let r = p.run(&["read", "#gone"]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert_eq!(
+        p.run(&["eval", "document.getElementById('gone').remove(); true"])
+            .code,
+        0
+    );
+    let collected = || {
+        p.cdp_call(
+            "tauri.localhost/",
+            "HeapProfiler.collectGarbage",
+            serde_json::json!({}),
+        );
+        p.run(&["eval", "window.__gone.deref() === undefined"]).out["value"] == true
+    };
+    assert!(
+        eventually(5000, collected),
+        "the element read by pokit is still alive after it left the page: its remote object was not released"
+    );
+}
