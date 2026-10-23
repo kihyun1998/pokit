@@ -168,6 +168,28 @@ fn with_probes(id: &str, body: &str) -> String {
     )
 }
 
+/// The hidden period the page reports as `from`..`to`. When it starts inside a gap longer than
+/// `long_ms`, or in the frame right after one (painting had resumed, the next frame within
+/// `long_ms`), and the page reports it over only after painting resumed, the gap is the hidden
+/// period. Otherwise it is `from`..`to` as reported.
+fn hidden_span(frames: &[f64], (from, to): (f64, f64), long_ms: f64) -> (f64, f64) {
+    let around = frames.windows(2).find(|w| {
+        let (before, after) = (w[0], w[1]);
+        if after - before <= long_ms {
+            return false;
+        }
+        let next = frames.iter().copied().find(|f| *f > after);
+        let in_gap = before < from && from < after;
+        let in_frame_after =
+            next.is_some_and(|next| next - after <= long_ms && after <= from && from < next);
+        in_gap || in_frame_after
+    });
+    match around {
+        Some(w) if to > w[1] => (w[0], w[1]),
+        _ => (from, to),
+    }
+}
+
 /// The `measure stop` result from what the probes recorded.
 pub fn summarize(raw: &Value, t: &Thresholds) -> Fields {
     let origin = raw["origin"].as_f64().unwrap_or(0.0);
@@ -178,16 +200,17 @@ pub fn summarize(raw: &Value, t: &Thresholds) -> Fields {
             .unwrap_or_default()
     };
 
+    let frames = times(&raw["frames"]);
     let hidden: Vec<(f64, f64)> = raw["hidden"]
         .as_array()
         .map(|spans| {
             spans
                 .iter()
                 .map(|s| (s[0].as_f64().unwrap_or(now), s[1].as_f64().unwrap_or(now)))
+                .map(|span| hidden_span(&frames, span, t.long_frame_ms))
                 .collect()
         })
         .unwrap_or_default();
-    let frames = times(&raw["frames"]);
     let mut gaps: Vec<f64> = frames
         .windows(2)
         .filter(|w| !hidden.iter().any(|(from, to)| *from < w[1] && *to > w[0]))
@@ -408,6 +431,66 @@ mod tests {
             s["hidden"],
             json!({ "was_hidden": true, "hidden_ms": 840.0 })
         );
+    }
+
+    /// Frames 0..32, then none for 817 ms while the page was hidden, as WebView2 reported the
+    /// hidden period only once it was over (#99).
+    fn late_hidden(hidden: Value) -> Fields {
+        let raw = json!({
+            "origin": 0.0, "start": 0.0, "now": 1200.0,
+            "frames": [0.0, 16.0, 32.0, 849.0, 866.0, 882.0],
+            "keys": [], "changes": null, "hidden": hidden,
+        });
+        summarize(&raw, &Thresholds::default())
+    }
+
+    #[test]
+    fn a_hidden_period_reported_in_the_frame_after_a_long_gap_began_with_the_gap() {
+        let s = late_hidden(json!([[855.0, 856.0]]));
+        assert_eq!(s["frames"]["max_ms"], 17.0, "{s:?}");
+        assert_eq!(s["frames"]["count"], 4, "{s:?}");
+        assert_eq!(
+            s["hidden"],
+            json!({ "was_hidden": true, "hidden_ms": 817.0 })
+        );
+    }
+
+    #[test]
+    fn a_hidden_period_later_than_the_frame_after_a_long_gap_stays_where_it_was() {
+        let s = late_hidden(json!([[870.0, 871.0]]));
+        assert_eq!(s["frames"]["max_ms"], 817.0, "{s:?}");
+        assert_eq!(s["hidden"]["hidden_ms"], 1.0, "{s:?}");
+    }
+
+    #[test]
+    fn a_hidden_period_reported_at_the_end_of_a_long_gap_and_over_after_it_is_the_gap() {
+        let s = late_hidden(json!([[848.5, 851.0]]));
+        assert_eq!(s["frames"]["max_ms"], 17.0, "{s:?}");
+        assert_eq!(s["hidden"]["hidden_ms"], 817.0, "{s:?}");
+    }
+
+    #[test]
+    fn a_page_hidden_right_after_a_long_frame_keeps_both() {
+        let raw = json!({
+            "origin": 0.0, "start": 0.0, "now": 1000.0,
+            "frames": [0.0, 16.0, 216.0, 900.0, 916.0],
+            "keys": [], "changes": null, "hidden": [[220.0, 890.0]],
+        });
+        let s = summarize(&raw, &Thresholds::default());
+        assert_eq!(s["frames"]["max_ms"], 200.0, "{s:?}");
+        assert_eq!(s["hidden"]["hidden_ms"], 670.0, "{s:?}");
+    }
+
+    #[test]
+    fn a_hidden_period_after_a_short_gap_stays_where_it_was() {
+        let raw = json!({
+            "origin": 0.0, "start": 0.0, "now": 100.0,
+            "frames": [0.0, 16.0, 32.0, 48.0],
+            "keys": [], "changes": null, "hidden": [[40.0, 41.0]],
+        });
+        let s = summarize(&raw, &Thresholds::default());
+        assert_eq!(s["hidden"]["hidden_ms"], 1.0, "{s:?}");
+        assert_eq!(s["frames"]["count"], 2, "{s:?}");
     }
 
     #[test]

@@ -174,8 +174,8 @@ fn a_hidden_webview_is_reported_and_its_gap_is_not_a_frame() {
     );
     let longest = m["frames"]["max_ms"].as_f64().unwrap();
     assert!(
-        longest < hidden / 2.0,
-        "a {longest} ms frame: the gap across the hidden period was read as a frame: {m}"
+        longest < 400.0,
+        "a {longest} ms frame: the gap across the 800 ms hidden period was read as a frame: {m}"
     );
 }
 
