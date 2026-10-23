@@ -354,6 +354,79 @@ impl Pokit {
             .to_string()
     }
 
+    /// Sends `method` straight to the page whose URL ends with `url_end` over the launched
+    /// app's debugging port, bypassing pokit, and returns its result.
+    pub fn cdp_call(&self, url_end: &str, method: &str, params: Value) -> Value {
+        use futures_util::{SinkExt, StreamExt};
+        use std::io::{Read, Write};
+        let port = self.launched.as_ref().unwrap()["cdp_port"]
+            .as_u64()
+            .unwrap();
+        let mut http = std::net::TcpStream::connect(("127.0.0.1", port as u16)).unwrap();
+        write!(
+            http,
+            "GET /json/list HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        let mut reply = Vec::new();
+        let mut chunk = [0u8; 8192];
+        let body = loop {
+            let n = http.read(&mut chunk).unwrap();
+            assert!(
+                n > 0,
+                "the debugging port closed before its reply was complete"
+            );
+            reply.extend_from_slice(&chunk[..n]);
+            let text = String::from_utf8_lossy(&reply).to_string();
+            let Some(head_end) = text.find("\r\n\r\n") else {
+                continue;
+            };
+            let length = text[..head_end]
+                .lines()
+                .find_map(|l| {
+                    let l = l.to_ascii_lowercase();
+                    l.strip_prefix("content-length:")
+                        .map(|v| v.trim().to_string())
+                })
+                .and_then(|v| v.parse::<usize>().ok())
+                .expect("the debugging port's reply has no Content-Length");
+            if text.len() >= head_end + 4 + length {
+                break text[head_end + 4..head_end + 4 + length].to_string();
+            }
+        };
+        let body = body.as_str();
+        let pages: Vec<Value> = serde_json::from_str(body).unwrap();
+        let ws = pages
+            .iter()
+            .find(|p| p["url"].as_str().is_some_and(|u| u.ends_with(url_end)))
+            .and_then(|p| p["id"].as_str())
+            .map(|id| format!("ws://127.0.0.1:{port}/devtools/page/{id}"))
+            .unwrap_or_else(|| panic!("no page ends with {url_end}: {body}"));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async move {
+            let (mut socket, _) = tokio_tungstenite::connect_async(ws).await.unwrap();
+            let call = serde_json::json!({ "id": 1, "method": method, "params": params });
+            socket
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    call.to_string(),
+                ))
+                .await
+                .unwrap();
+            while let Some(Ok(message)) = socket.next().await {
+                if let Ok(text) = message.into_text() {
+                    let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+                    if v["id"] == 1 {
+                        return v;
+                    }
+                }
+            }
+            panic!("no answer to {method}");
+        })
+    }
+
     pub fn app_pid(&self) -> u32 {
         self.launched.as_ref().unwrap()["app_pid"].as_u64().unwrap() as u32
     }

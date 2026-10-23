@@ -390,46 +390,6 @@ impl CommandKind {
         }
     }
 
-    /// Whether it resolves elements to remote objects, which are released when it ends.
-    pub fn resolves_elements(self) -> bool {
-        match self {
-            CommandKind::Read
-            | CommandKind::Click
-            | CommandKind::Type
-            | CommandKind::Key
-            | CommandKind::Hold
-            | CommandKind::Drag
-            | CommandKind::Wheel
-            | CommandKind::Capture => true,
-            CommandKind::Ping
-            | CommandKind::Status
-            | CommandKind::Close
-            | CommandKind::Targets
-            | CommandKind::MeasureStart
-            | CommandKind::MeasureStop
-            | CommandKind::ClipboardRead
-            | CommandKind::ClipboardWrite
-            | CommandKind::WindowActivate
-            | CommandKind::WindowMove
-            | CommandKind::WindowResize
-            | CommandKind::NativeList
-            | CommandKind::NativeChoose
-            | CommandKind::NativeAnswer
-            | CommandKind::NativeDismiss
-            | CommandKind::NativePick
-            | CommandKind::NativeTray
-            | CommandKind::TraceStart
-            | CommandKind::TraceStop
-            | CommandKind::ProfileStart
-            | CommandKind::ProfileStop
-            | CommandKind::Snapshot
-            | CommandKind::Wait
-            | CommandKind::Logs
-            | CommandKind::Eval
-            | CommandKind::Doctor => false,
-        }
-    }
-
     /// Whether it goes into the run record, and `capabilities` lists it.
     pub fn is_public(self) -> bool {
         match self {
