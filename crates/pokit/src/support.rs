@@ -3,7 +3,7 @@
 use crate::output::{Failure, Kind};
 
 /// The commands the macOS backend answers, by their command-line name.
-const ON_MACOS: &[&str] = &["capabilities", "launch", "close", "eval"];
+const ON_MACOS: &[&str] = &["capabilities", "launch", "close", "eval", "read", "wait"];
 
 /// Why trace and profile are refused on macOS.
 const NO_TIMELINE: &str =

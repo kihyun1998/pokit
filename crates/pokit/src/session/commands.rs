@@ -1,5 +1,6 @@
 //! Answering one request: the command handlers, the focus guards, and the page helpers they share.
 
+use super::page::Page;
 use super::record::screenshot_to;
 use super::State;
 use crate::cdp::Cdp;
@@ -502,42 +503,47 @@ impl State {
             )
             .await?;
         if let Some(e) = r.get("exceptionDetails") {
-            return Err(Failure::new(
-                Kind::Error,
-                format!("invalid selector `{target}`: {}", exception_text(e)),
-            ));
+            return Err(invalid_selector(target, &exception_text(e)));
         }
         match r["result"]["objectId"].as_str() {
             Some(id) => Ok((tid, cdp, id.to_string())),
-            None => Err(
-                Failure::new(Kind::NotFound, format!("no element matches `{target}`"))
-                    .with("selector", target),
-            ),
+            None => Err(no_match(target)),
         }
     }
 
     async fn read_cmd(&self, target: &str) -> Outcome {
-        let (_, cdp, obj) = self.resolve(target).await?;
-        let v = call_on(
-            &cdp,
-            &obj,
-            "function() {
-                const r = this.getBoundingClientRect();
-                return {
-                    tag: this.tagName.toLowerCase(),
-                    text: (this.innerText ?? this.textContent ?? '').trim(),
-                    value: 'value' in this ? String(this.value) : null,
-                    state: {
-                        focused: document.activeElement === this,
-                        disabled: !!this.disabled,
-                        checked: 'checked' in this ? !!this.checked : null,
-                        visible: r.width > 0 && r.height > 0,
-                    },
-                };
-            }",
-            &[],
-        )
-        .await?;
+        let v = match self.page()? {
+            (_, Page::Plugin(_)) if snapshot::is_ref(target) => {
+                return Err(Failure::new(
+                    Kind::Unsupported,
+                    format!("ref {target}: refs come with snapshot, not built on macOS yet (#14)"),
+                )
+                .with("ref", target));
+            }
+            (_, page @ Page::Plugin(_)) => {
+                let js = format!(
+                    "(() => {{
+                        let el;
+                        try {{ el = document.querySelector({sel}); }}
+                        catch (e) {{ return {{ invalid: String(e) }}; }}
+                        return el ? {{ element: ({READ_ELEMENT}).call(el) }} : {{}};
+                    }})()",
+                    sel = json!(target)
+                );
+                let r = page.eval(&js, EVALUATE_TIMEOUT).await?;
+                if let Some(e) = r["invalid"].as_str() {
+                    return Err(invalid_selector(target, e));
+                }
+                match r.get("element") {
+                    Some(element) => element.clone(),
+                    None => return Err(no_match(target)),
+                }
+            }
+            (_, Page::Cdp(_)) => {
+                let (_, cdp, obj) = self.resolve(target).await?;
+                call_on(&cdp, &obj, READ_ELEMENT, &[]).await?
+            }
+        };
         let mut f = Fields::new();
         if let Value::Object(m) = v {
             f.extend(m);
@@ -805,8 +811,8 @@ impl State {
         let start = Instant::now();
         let mut found = absent;
         loop {
-            let (_, cdp) = self.current()?;
-            match evaluate(&cdp, &expr).await {
+            let (_, page) = self.page()?;
+            match page.eval(&expr, EVALUATE_TIMEOUT).await {
                 Ok(Value::Bool(true)) => {
                     return Ok(fields! { "waited_ms" => start.elapsed().as_millis() as u64 });
                 }
@@ -1437,6 +1443,30 @@ pub(super) fn exception_text(details: &Value) -> String {
         .or(details["text"].as_str())
         .unwrap_or("exception")
         .to_string()
+}
+
+/// What `read` reports of an element, as a function called on it.
+const READ_ELEMENT: &str = "function() {
+    const r = this.getBoundingClientRect();
+    return {
+        tag: this.tagName.toLowerCase(),
+        text: (this.innerText ?? this.textContent ?? '').trim(),
+        value: 'value' in this ? String(this.value) : null,
+        state: {
+            focused: document.activeElement === this,
+            disabled: !!this.disabled,
+            checked: 'checked' in this ? !!this.checked : null,
+            visible: r.width > 0 && r.height > 0,
+        },
+    };
+}";
+
+fn invalid_selector(target: &str, error: &str) -> Failure {
+    Failure::new(Kind::Error, format!("invalid selector `{target}`: {error}"))
+}
+
+fn no_match(target: &str) -> Failure {
+    Failure::new(Kind::NotFound, format!("no element matches `{target}`")).with("selector", target)
 }
 
 /// How long a page helper's evaluation may take.
