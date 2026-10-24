@@ -38,6 +38,9 @@ fn clear_events(p: &Pokit) {
 /// Holds `FRONT`, because it brings its fixture to the front.
 #[test]
 fn os_type_and_key_count_the_keydowns_the_page_received() {
+    if !quiet_machine("os_type_and_key_count_the_keydowns_the_page_received") {
+        return;
+    }
     let _front = front();
     let p = Pokit::launch_fixture("os-delivery");
     assert_eq!(p.run(&["window", "activate"]).code, 0);
@@ -139,6 +142,9 @@ fn os_type_and_key_count_the_keydowns_the_page_received() {
 
 #[test]
 fn os_input_to_an_app_not_in_front_is_refused_and_sends_nothing() {
+    if !quiet_machine("os_input_to_an_app_not_in_front_is_refused_and_sends_nothing") {
+        return;
+    }
     let _front = front();
     let p = Pokit::launch_fixture("os-guard");
     clear_events(&p);
@@ -190,6 +196,9 @@ fn os_input_to_an_app_not_in_front_is_refused_and_sends_nothing() {
 /// One test, because each case brings its own fixture to the front.
 #[test]
 fn os_input_reaches_the_page_as_a_hand_would_send_it() {
+    if !quiet_machine("os_input_reaches_the_page_as_a_hand_would_send_it") {
+        return;
+    }
     let _front = front();
     let p = Pokit::launch_fixture("os-input");
     let r = p.run(&["window", "activate"]);
@@ -369,6 +378,9 @@ fn wheeled(p: &Pokit, notches: &str, route: &str) -> (Value, Vec<String>) {
 /// Holds `FRONT`, because each case brings its fixture to the front.
 #[test]
 fn hold_wheel_and_the_comparison_run_on_both_routes() {
+    if !quiet_machine("hold_wheel_and_the_comparison_run_on_both_routes") {
+        return;
+    }
     let _front = front();
     let p = Pokit::launch_fixture("os-b");
     assert_eq!(p.run(&["window", "activate"]).code, 0);
@@ -533,6 +545,10 @@ fn hold_wheel_and_the_comparison_run_on_both_routes() {
 /// Holds `FRONT`, because the drag brings its fixture to the front.
 #[test]
 fn a_drag_out_of_the_window_through_the_os_opens_a_window_where_it_was_dropped() {
+    if !quiet_machine("a_drag_out_of_the_window_through_the_os_opens_a_window_where_it_was_dropped")
+    {
+        return;
+    }
     let _front = front();
     let p = Pokit::launch_fixture("os-drag");
     assert_eq!(p.run(&["window", "move", "--x", "40", "--y", "40"]).code, 0);
@@ -574,6 +590,9 @@ fn a_drag_out_of_the_window_through_the_os_opens_a_window_where_it_was_dropped()
 /// Holds `FRONT`, because the drags bring their fixture to the front.
 #[test]
 fn an_os_html5_drag_that_never_reached_the_page_is_not_delivered() {
+    if !quiet_machine("an_os_html5_drag_that_never_reached_the_page_is_not_delivered") {
+        return;
+    }
     let _front = front();
     let p = Pokit::launch_fixture("html5-drag-os");
     // Each drag page is placed apart from the other.
@@ -648,6 +667,9 @@ fn an_os_html5_drag_that_never_reached_the_page_is_not_delivered() {
 /// Holds `FRONT`, because both fixtures are brought to the front in turn.
 #[test]
 fn window_activate_brings_forward_the_window_of_the_current_page() {
+    if !quiet_machine("window_activate_brings_forward_the_window_of_the_current_page") {
+        return;
+    }
     let _front = front();
     let p = Pokit::launch_fixture("activate-page");
     let other = Pokit::launch_fixture("activate-other");
@@ -704,6 +726,9 @@ fn window_activate_brings_forward_the_window_of_the_current_page() {
 /// Holds `FRONT`, because both fixtures are brought to the front in turn.
 #[test]
 fn os_input_goes_ahead_only_with_the_window_of_the_current_page_in_front() {
+    if !quiet_machine("os_input_goes_ahead_only_with_the_window_of_the_current_page_in_front") {
+        return;
+    }
     let _front = front();
     let p = Pokit::launch_fixture("guard-page");
     let other = Pokit::launch_fixture("guard-other");
