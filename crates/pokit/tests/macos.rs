@@ -750,18 +750,15 @@ impl InputSource {
         // SAFETY: Carbon's input source calls on objects it returns; each one copied, created or
         // retained here is released, `before` and `enabled` on drop.
         unsafe {
-            let find = |include_all: bool| {
-                let list = TISCreateInputSourceList(std::ptr::null(), include_all);
-                let found = (0..CFArrayGetCount(list))
-                    .map(|i| CFArrayGetValueAtIndex(list, i))
-                    .find(|s| source_id(*s).as_deref() == Some(id))
-                    .map(|s| CFRetain(s));
-                CFRelease(list);
-                found
-            };
+            let find = |include_all: bool| find_id(id, include_all);
             let (source, enabled) = match find(false) {
                 Some(s) => (s, None),
                 None if on_ci() => {
+                    if let Some((method, _)) = id.rsplit_once('.') {
+                        let m = find_id(method, true).ok_or("its input method is not installed")?;
+                        TISEnableInputSource(m);
+                        CFRelease(m);
+                    }
                     let s = find(true).ok_or("not among the installed input sources")?;
                     let status = TISEnableInputSource(s);
                     if status != 0 {
@@ -803,6 +800,17 @@ impl Drop for InputSource {
             }
         }
     }
+}
+
+/// The input source `id`, retained, among the enabled ones or among every installed one.
+unsafe fn find_id(id: &str, include_all: bool) -> Option<*const std::ffi::c_void> {
+    let list = TISCreateInputSourceList(std::ptr::null(), include_all);
+    let found = (0..CFArrayGetCount(list))
+        .map(|i| CFArrayGetValueAtIndex(list, i))
+        .find(|s| source_id(*s).as_deref() == Some(id))
+        .map(|s| CFRetain(s));
+    CFRelease(list);
+    found
 }
 
 /// An input source's identifier.
