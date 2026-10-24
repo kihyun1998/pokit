@@ -40,3 +40,23 @@ jobs:
         if: ${{ !cancelled() }}
       - run: cargo test --workspace --no-fail-fast
         if: ${{ !cancelled() }}
+      - name: WebView2 diagnosis (temporary, #112)
+        if: ${{ runner.os == 'Windows' && !cancelled() }}
+        shell: pwsh
+        run: |
+          "interactive: " + [Environment]::UserInteractive
+          whoami
+          query session
+          "session: " + (Get-Process -Id $PID).SessionId
+          $d = Join-Path $env:RUNNER_TEMP wv2
+          $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=0"
+          $env:WEBVIEW2_USER_DATA_FOLDER = $d
+          $p = Start-Process target\fixture\debug\pokit-fixture.exe -PassThru
+          Start-Sleep 45
+          "alive: " + (-not $p.HasExited)
+          if ($p.HasExited) { "exit: " + $p.ExitCode }
+          Get-Process msedgewebview2 -ErrorAction SilentlyContinue | Select-Object Id, SessionId | Format-Table
+          Get-ChildItem -Recurse $d -Filter DevToolsActivePort -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName; Get-Content $_.FullName }
+          Get-ChildItem $d -ErrorAction SilentlyContinue | Select-Object -First 20 Name
+          Get-WinEvent -LogName Application -MaxEvents 30 -ErrorAction SilentlyContinue | Where-Object { $_.Message -match 'pokit-fixture|msedgewebview2' } | Select-Object -First 5 TimeCreated, Id, Message | Format-List
+          Stop-Process $p -ErrorAction SilentlyContinue
