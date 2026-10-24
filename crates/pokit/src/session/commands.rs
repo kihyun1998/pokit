@@ -1298,9 +1298,13 @@ pub(super) const NOTE_KEYDOWNS: &str = "const old = window.__pokitKeydowns; \
     const c = { codes: [] }; c.h = (e) => { if (e.isTrusted) c.codes.push(e.code); }; \
     window.addEventListener('keydown', c.h, true); window.__pokitKeydowns = c;";
 
-/// How long `check_delivery` waits for keys still on their way to the page after the command
-/// that sent them returned: OS input, and the plugin's.
+/// How long `check_delivery` waits for OS keys still on their way to the page after the command
+/// that sent them returned.
+#[cfg(windows)]
 pub(super) const KEYS_SETTLE_MS: u64 = 500;
+
+/// How long the plugin route waits for its keys to reach the page after it sent them.
+pub(super) const PLUGIN_KEYS_SETTLE_MS: u64 = 2000;
 
 /// Reads and removes the listener `NOTE_KEYDOWNS` installed, once a keydown has arrived for each
 /// of the `sent` codes or `settle_ms` has passed. When every key was sent (`sent_all`) and some

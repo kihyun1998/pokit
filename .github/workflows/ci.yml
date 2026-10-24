@@ -34,32 +34,38 @@ jobs:
           fi
           uname -m
           rustc --version
+      - name: WebView2 diagnosis (temporary, #112)
+        if: ${{ runner.os == 'Windows' }}
+        shell: pwsh
+        run: |
+          cargo build -q -p pokit-fixture --target-dir target/fixture
+          $exe = "target\fixture\debug\pokit-fixture.exe"
+          function Try-Launch($name) {
+            $d = Join-Path $env:RUNNER_TEMP "wv2-$name"
+            $env:WEBVIEW2_USER_DATA_FOLDER = $d
+            $p = Start-Process $exe -PassThru
+            Start-Sleep 30
+            $port = Get-ChildItem -Recurse $d -Filter DevToolsActivePort -ErrorAction SilentlyContinue | Select-Object -First 1
+            $cmd = (Get-CimInstance Win32_Process -Filter "name='msedgewebview2.exe'" | Where-Object { $_.CommandLine -match '--embedded-browser-webview=1' -and $_.CommandLine -match [regex]::Escape($d) } | Select-Object -First 1).CommandLine
+            "== $name: alive=$(-not $p.HasExited) port=$(if ($port) { (Get-Content $port.FullName)[0] } else { 'none' }) debugging-arg=$($cmd -match 'remote-debugging-port')"
+            Stop-Process $p -ErrorAction SilentlyContinue
+            Get-Process msedgewebview2 -ErrorAction SilentlyContinue | Stop-Process -ErrorAction SilentlyContinue
+            Start-Sleep 3
+          }
+          $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=0"
+          Try-Launch "env"
+          Remove-Item Env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS
+          $k = "HKCU:\Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments"
+          New-Item -Path $k -Force | Out-Null
+          New-ItemProperty -Path $k -Name "pokit-fixture.exe" -Value "--remote-debugging-port=0" -Force | Out-Null
+          Try-Launch "policy"
+          Remove-Item -Path "HKCU:\Software\Policies\Microsoft\Edge\WebView2" -Recurse -Force
+          $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=9333"
+          Try-Launch "env-fixed-port"
+          Remove-Item Env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS
       - run: cargo fmt --all -- --check
         if: ${{ !cancelled() }}
       - run: cargo clippy --workspace --all-targets -- -D warnings
         if: ${{ !cancelled() }}
       - run: cargo test --workspace --no-fail-fast
         if: ${{ !cancelled() }}
-      - name: WebView2 diagnosis (temporary, #112)
-        if: ${{ runner.os == 'Windows' && !cancelled() }}
-        shell: pwsh
-        run: |
-          "interactive: " + [Environment]::UserInteractive
-          whoami
-          query session
-          "session: " + (Get-Process -Id $PID).SessionId
-          $d = Join-Path $env:RUNNER_TEMP wv2
-          $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=0"
-          $env:WEBVIEW2_USER_DATA_FOLDER = $d
-          $p = Start-Process target\fixture\debug\pokit-fixture.exe -PassThru
-          Start-Sleep 45
-          "alive: " + (-not $p.HasExited)
-          if ($p.HasExited) { "exit: " + $p.ExitCode }
-          Get-CimInstance Win32_Process -Filter "name='msedgewebview2.exe'" | Select-Object -First 2 -ExpandProperty CommandLine
-          foreach ($k in 'HKLM:\SOFTWARE\Policies\Microsoft\Edge', 'HKLM:\SOFTWARE\Policies\Microsoft\Edge\WebView2', 'HKCU:\SOFTWARE\Policies\Microsoft\Edge', 'HKCU:\SOFTWARE\Policies\Microsoft\Edge\WebView2') {
-            if (Test-Path $k) { "== $k"; Get-ItemProperty $k | Format-List; Get-ChildItem $k | ForEach-Object { "-- " + $_.Name; Get-ItemProperty $_.PSPath | Format-List } } else { "(no $k)" }
-          }
-          Get-ChildItem -Recurse $d -Filter DevToolsActivePort -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName; Get-Content $_.FullName }
-          Get-ChildItem $d -ErrorAction SilentlyContinue | Select-Object -First 20 Name
-          Get-WinEvent -LogName Application -MaxEvents 30 -ErrorAction SilentlyContinue | Where-Object { $_.Message -match 'pokit-fixture|msedgewebview2' } | Select-Object -First 5 TimeCreated, Id, Message | Format-List
-          Stop-Process $p -ErrorAction SilentlyContinue
