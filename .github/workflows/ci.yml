@@ -55,7 +55,10 @@ jobs:
           Start-Sleep 45
           "alive: " + (-not $p.HasExited)
           if ($p.HasExited) { "exit: " + $p.ExitCode }
-          Get-Process msedgewebview2 -ErrorAction SilentlyContinue | Select-Object Id, SessionId | Format-Table
+          Get-CimInstance Win32_Process -Filter "name='msedgewebview2.exe'" | Select-Object -First 2 -ExpandProperty CommandLine
+          foreach ($k in 'HKLM:\SOFTWARE\Policies\Microsoft\Edge', 'HKLM:\SOFTWARE\Policies\Microsoft\Edge\WebView2', 'HKCU:\SOFTWARE\Policies\Microsoft\Edge', 'HKCU:\SOFTWARE\Policies\Microsoft\Edge\WebView2') {
+            if (Test-Path $k) { "== $k"; Get-ItemProperty $k | Format-List; Get-ChildItem $k | ForEach-Object { "-- " + $_.Name; Get-ItemProperty $_.PSPath | Format-List } } else { "(no $k)" }
+          }
           Get-ChildItem -Recurse $d -Filter DevToolsActivePort -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName; Get-Content $_.FullName }
           Get-ChildItem $d -ErrorAction SilentlyContinue | Select-Object -First 20 Name
           Get-WinEvent -LogName Application -MaxEvents 30 -ErrorAction SilentlyContinue | Where-Object { $_.Message -match 'pokit-fixture|msedgewebview2' } | Select-Object -First 5 TimeCreated, Id, Message | Format-List
