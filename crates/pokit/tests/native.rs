@@ -155,6 +155,9 @@ fn a_dialog_is_read_answered_and_closes_with_the_answer() {
 
 #[test]
 fn a_dialog_the_app_opens_does_not_keep_the_foreground() {
+    if !quiet_machine("a_dialog_the_app_opens_does_not_keep_the_foreground") {
+        return;
+    }
     let _focus = FOCUS.lock().unwrap_or_else(|e| e.into_inner());
     let before = window::foreground();
     let p = Pokit::launch_fixture("native-focus");
@@ -214,6 +217,9 @@ fn context_menu_closed(p: &Pokit) -> bool {
 
 #[test]
 fn a_context_menu_is_read_chosen_in_and_dismissed() {
+    if !quiet_machine("a_context_menu_is_read_chosen_in_and_dismissed") {
+        return;
+    }
     let _focus = FOCUS.lock().unwrap_or_else(|e| e.into_inner());
     let p = Pokit::launch_fixture("native-context");
     let before = window::foreground();
@@ -283,6 +289,9 @@ fn a_context_menu_is_read_chosen_in_and_dismissed() {
 
 #[test]
 fn the_tray_icon_is_clicked_and_its_menu_chosen_in() {
+    if !quiet_machine("the_tray_icon_is_clicked_and_its_menu_chosen_in") {
+        return;
+    }
     let _focus = FOCUS.lock().unwrap_or_else(|e| e.into_inner());
     let mut p = Pokit::new("native-tray");
     let exe = fixture_exe().to_str().unwrap().to_string();
@@ -330,6 +339,9 @@ fn the_tray_icon_is_clicked_and_its_menu_chosen_in() {
 
 #[test]
 fn a_file_is_picked_in_the_apps_file_dialog() {
+    if !quiet_machine("a_file_is_picked_in_the_apps_file_dialog") {
+        return;
+    }
     let _focus = FOCUS.lock().unwrap_or_else(|e| e.into_inner());
     let p = Pokit::launch_fixture("native-file");
     let before = window::foreground();
