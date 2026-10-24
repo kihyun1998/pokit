@@ -190,9 +190,12 @@ fn typed_text_arrives_as_given_under_a_korean_input_source() {
         return;
     }
     let p = Pokit::launch_fixture("mac-input-source");
-    let Some(_korean) = InputSource::select("com.apple.inputmethod.Korean.2SetKorean") else {
-        cannot_judge("2-Set Korean could not be enabled and selected");
-        return;
+    let _korean = match InputSource::select("com.apple.inputmethod.Korean.2SetKorean") {
+        Ok(selected) => selected,
+        Err(why) => {
+            cannot_judge(&format!("2-Set Korean: {why}"));
+            return;
+        }
     };
     let r = p.run(&["type", "abc", "--into", "#name"]);
     assert_eq!(r.code, 0, "{}", r.out);
@@ -741,9 +744,9 @@ extern "C" {
 }
 
 impl InputSource {
-    /// Selects input source `id`, enabling it first on CI when it is not enabled; `None` when it
-    /// is not enabled here, or did not take.
-    fn select(id: &str) -> Option<InputSource> {
+    /// Selects input source `id`, enabling it first on CI when it is not enabled; why not, when
+    /// it is not enabled here or did not take.
+    fn select(id: &str) -> Result<InputSource, String> {
         // SAFETY: Carbon's input source calls on objects it returns; each one copied, created or
         // retained here is released, `before` and `enabled` on drop.
         unsafe {
@@ -759,25 +762,31 @@ impl InputSource {
             let (source, enabled) = match find(false) {
                 Some(s) => (s, None),
                 None if on_ci() => {
-                    let s = find(true)?;
-                    if TISEnableInputSource(s) != 0 {
+                    let s = find(true).ok_or("not among the installed input sources")?;
+                    let status = TISEnableInputSource(s);
+                    if status != 0 {
                         CFRelease(s);
-                        return None;
+                        return Err(format!("TISEnableInputSource returned {status}"));
                     }
                     (s, Some(CFRetain(s)))
                 }
-                None => return None,
+                None => return Err("not an enabled input source".into()),
             };
             let selected = InputSource {
                 before: TISCopyCurrentKeyboardInputSource(),
                 enabled,
             };
-            let ok = TISSelectInputSource(source) == 0;
+            let status = TISSelectInputSource(source);
             CFRelease(source);
             let now = TISCopyCurrentKeyboardInputSource();
-            let took = ok && source_id(now).as_deref() == Some(id);
+            let current = source_id(now);
             CFRelease(now);
-            took.then_some(selected)
+            if status != 0 || current.as_deref() != Some(id) {
+                return Err(format!(
+                    "TISSelectInputSource returned {status}; the current source is {current:?}"
+                ));
+            }
+            Ok(selected)
         }
     }
 }
