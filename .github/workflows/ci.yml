@@ -14,7 +14,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest]
+        # windows-2022, not windows-latest: docs/map/testing-against-the-fixture.md
+        os: [macos-latest, windows-2022]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -41,61 +42,3 @@ jobs:
       - run: cargo test --workspace --no-fail-fast
         if: ${{ !cancelled() }}
 
-  webview2-probe:
-    # Temporary (#112): why WebView2 on the runner opens no debugging port.
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-2022, windows-2025]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Toolchain (rust-toolchain.toml)
-        run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-      - name: Probe
-        shell: pwsh
-        run: |
-          cmd /c ver
-          "webview2: " + (Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}').pv
-          "integrity: " + ((whoami /groups | Select-String 'Mandatory Label') -replace '\s+', ' ')
-          cargo build -q -p pokit-fixture --target-dir target/fixture
-          $exe = (Resolve-Path "target\fixture\debug\pokit-fixture.exe").Path
-          function Browser-Line($dir) {
-            (Get-CimInstance Win32_Process -Filter "name='msedgewebview2.exe'" | Where-Object { $_.CommandLine -match '--embedded-browser-webview=1' -and $_.CommandLine -match [regex]::Escape($dir) } | Select-Object -First 1).CommandLine
-          }
-          function Port($dir) {
-            $f = Get-ChildItem -Recurse $dir -Filter DevToolsActivePort -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($f) { (Get-Content $f.FullName)[0] } else { 'none' }
-          }
-          function Stop-All { Get-Process pokit-fixture, msedgewebview2, msedge -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue; Start-Sleep 3 }
-
-          # 1. the environment variable, with a harmless switch beside the debugging one
-          $d = Join-Path $env:RUNNER_TEMP "wv2-env"
-          $env:WEBVIEW2_USER_DATA_FOLDER = $d
-          $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--lang=ko-KR --remote-debugging-port=0"
-          Start-Process $exe | Out-Null; Start-Sleep 25
-          $line = Browser-Line $d
-          "== env: port=$(Port $d) lang-ko=$($line -match 'lang=ko-KR') debugging-arg=$($line -match 'remote-debugging-port')"
-          Stop-All
-          Remove-Item Env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS, Env:WEBVIEW2_USER_DATA_FOLDER
-
-          # 2. Edge itself, the same Chromium, with a debugging port
-          $edge = "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe"
-          $e = Join-Path $env:RUNNER_TEMP "edge"
-          Start-Process $edge -ArgumentList "--user-data-dir=$e", "--remote-debugging-port=0", "--no-first-run", "about:blank" | Out-Null; Start-Sleep 20
-          "== edge: version=$((Get-Item $edge).VersionInfo.ProductVersion) port=$(Port $e)"
-          Stop-All
-
-          # 3. the fixture at medium integrity, through a scheduled task in the interactive session
-          $m = Join-Path $env:RUNNER_TEMP "wv2-medium"
-          $cmd = "set WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=0&& set WEBVIEW2_USER_DATA_FOLDER=$m&& `"$exe`""
-          $action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c $cmd"
-          $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
-          Register-ScheduledTask -TaskName pokit-probe -Action $action -Principal $principal -Force | Out-Null
-          Start-ScheduledTask -TaskName pokit-probe; Start-Sleep 25
-          $line = Browser-Line $m
-          $proc = Get-CimInstance Win32_Process -Filter "name='pokit-fixture.exe'" | Select-Object -First 1
-          "== medium: running=$([bool]$proc) port=$(Port $m) debugging-arg=$($line -match 'remote-debugging-port')"
-          Stop-All
-          Unregister-ScheduledTask -TaskName pokit-probe -Confirm:$false
