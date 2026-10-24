@@ -12,6 +12,9 @@ pub const TOKEN_VAR: &str = "POKIT_TOKEN";
 /// (`tauri_plugin_pokit::PORT_FILE_VAR`).
 pub const PORT_FILE_VAR: &str = "POKIT_PORT_FILE";
 
+/// How long the plugin may take to deliver input events.
+const INPUT_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// How much longer than the page's own timeout pokit waits for the plugin's reply.
 const REPLY_MARGIN: Duration = Duration::from_secs(2);
 
@@ -76,5 +79,16 @@ impl Plugin {
             )
             .await?;
         Ok(reply["value"].clone())
+    }
+
+    /// Delivers `events` (key events and text, as the plugin's `input` takes them) to webview
+    /// `label`'s window, in order.
+    pub async fn input(&self, label: &str, events: Value) -> Result<(), Failure> {
+        self.request(
+            json!({ "op": "input", "webview": label, "events": events }),
+            INPUT_TIMEOUT,
+        )
+        .await?;
+        Ok(())
     }
 }

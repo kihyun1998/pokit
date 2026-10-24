@@ -1,7 +1,7 @@
 //! Input on `--route os`: `SendInput` into the app, which must be in front with the page that
 //! takes the input.
 
-use super::commands::{check_delivery, evaluate, ClickHow, NOTE_KEYDOWNS, OS_KEYS_SETTLE_MS};
+use super::commands::{check_delivery, evaluate, ClickHow, KEYS_SETTLE_MS, NOTE_KEYDOWNS};
 use super::State;
 use crate::cdp::Cdp;
 use crate::chord;
@@ -145,7 +145,7 @@ impl State {
         let downs = press.down_codes();
         let sent = Instant::now();
         let pressed = os(move || crate::os_input::key(page, &code, modifiers)).await;
-        let delivery = check_delivery(&cdp, &downs, pressed.is_ok(), OS_KEYS_SETTLE_MS).await;
+        let delivery = check_delivery(&cdp, &downs, pressed.is_ok(), KEYS_SETTLE_MS).await;
         pressed?;
         let mut f = fields! {
             "code" => press.code,
@@ -169,7 +169,7 @@ impl State {
         let downs = crate::os_input::text_down_codes(&text);
         let sent = Instant::now();
         let typed = os(move || crate::os_input::text(page, &text)).await;
-        let delivery = check_delivery(&cdp, &downs, typed.is_ok(), OS_KEYS_SETTLE_MS).await;
+        let delivery = check_delivery(&cdp, &downs, typed.is_ok(), KEYS_SETTLE_MS).await;
         typed?;
         let mut f = fields! { "typed_chars" => chars, "route" => "os" };
         f.extend(delivery?);

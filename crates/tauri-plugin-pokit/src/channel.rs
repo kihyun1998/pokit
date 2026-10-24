@@ -122,8 +122,28 @@ fn answer<R: Runtime>(app: &AppHandle<R>, request: &Value) -> Value {
                 Duration::from_millis(request["timeout_ms"].as_u64().unwrap_or(DEFAULT_TIMEOUT_MS));
             evaluate(&webview, js, timeout)
         }
+        Some("input") => {
+            let label = request["webview"].as_str().unwrap_or("main");
+            let Some(webview) = app.get_webview_window(label) else {
+                return failure("not_found", format!("no webview labelled `{label}`"));
+            };
+            let Some(events) = request["events"].as_array() else {
+                return failure("bad_request", "input needs `events`");
+            };
+            deliver(&webview, events)
+        }
         other => failure("bad_request", format!("unknown op {other:?}")),
     }
+}
+
+#[cfg(target_os = "macos")]
+fn deliver<R: Runtime>(webview: &tauri::WebviewWindow<R>, events: &[Value]) -> Value {
+    crate::input::deliver(webview, events)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn deliver<R: Runtime>(_webview: &tauri::WebviewWindow<R>, _events: &[Value]) -> Value {
+    failure("unsupported", "the plugin delivers input on macOS only")
 }
 
 #[cfg(target_os = "macos")]

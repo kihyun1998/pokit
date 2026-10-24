@@ -3,7 +3,16 @@
 use crate::output::{Failure, Kind};
 
 /// The commands the macOS backend answers, by their command-line name.
-const ON_MACOS: &[&str] = &["capabilities", "launch", "close", "eval", "read", "wait"];
+const ON_MACOS: &[&str] = &[
+    "capabilities",
+    "launch",
+    "close",
+    "eval",
+    "read",
+    "wait",
+    "key",
+    "type",
+];
 
 /// Why trace and profile are refused on macOS.
 const NO_TIMELINE: &str =
@@ -45,6 +54,12 @@ pub fn routes(command: &str) -> Option<serde_json::Value> {
             "cdp": { "default": true, "takes_focus": false, "ime_composition": true },
             "os": { "takes_focus": true, "needs": "the app in front: `window activate`", "ime_composition": false },
         })),
+        "key" if cfg!(target_os = "macos") => Some(json!({
+            "plugin": { "default": true, "takes_focus": false },
+        })),
+        "type" if cfg!(target_os = "macos") => Some(json!({
+            "plugin": { "default": true, "takes_focus": false, "ime_composition": false },
+        })),
         "hold" | "wheel" if cfg!(windows) => Some(json!({ "cdp": cdp, "os": os })),
         "drag" if cfg!(windows) => Some(json!({
             "cdp": { "default": true, "takes_focus": false, "leaves_the_page": false, "html5_drag": "always" },
@@ -69,6 +84,28 @@ pub fn reason(command: &str) -> &'static str {
     } else {
         "only the Windows and macOS backends exist"
     }
+}
+
+/// Why a session refuses input by `route`: the plugin's session takes only the plugin route, a
+/// CDP session every route but the plugin's. `None` when it takes it.
+pub fn route_refused(route: crate::request::Route, through_plugin: bool) -> Option<Failure> {
+    use crate::request::Route;
+    let why = match (route, through_plugin) {
+        (Route::Plugin, true) | (Route::Cdp | Route::Os, false) => return None,
+        (Route::Cdp, true) => "there is no CDP on macOS: input goes through the app's plugin, the default route (`--route plugin`)",
+        (Route::Os, true) => "OS input is not built on macOS yet",
+        (Route::Plugin, false) => return Some(plugin_route_on_cdp()),
+    };
+    Some(Failure::new(Kind::Unsupported, why).with("platform", std::env::consts::OS))
+}
+
+/// The plugin route asked of a session that reaches the page over CDP.
+pub fn plugin_route_on_cdp() -> Failure {
+    Failure::new(
+        Kind::Unsupported,
+        "the plugin route is macOS's; this session reaches the page over CDP",
+    )
+    .with("platform", std::env::consts::OS)
 }
 
 /// The failure for `command` (a command-line name, or a request kind) refused here.

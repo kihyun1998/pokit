@@ -76,6 +76,9 @@ impl State {
         } else {
             None
         };
+        let wrong_route = request
+            .route()
+            .and_then(|r| crate::support::route_refused(r, self.plugin.is_some()));
         let outcome =
             RESOLVED
                 .scope(Resolved::new(), async {
@@ -83,6 +86,7 @@ impl State {
             _ if self.plugin.is_some() && !crate::support::plugin_answers(kind.name()) => {
                 Err(crate::support::refused(kind.name()))
             }
+            _ if wrong_route.is_some() => Err(wrong_route.clone().unwrap()),
             Request::Ping => Ok(Fields::new()),
             Request::Status => Ok(self.status()),
             Request::Close => {
@@ -140,6 +144,10 @@ impl State {
                 }
                 #[cfg(not(windows))]
                 Route::Os => Err(os_route_unsupported()),
+                Route::Plugin => {
+                    self.plugin_type_cmd(text, into.as_deref(), require_focus.as_deref())
+                        .await
+                }
             },
             Request::Key {
                 chord,
@@ -158,6 +166,10 @@ impl State {
                 }
                 #[cfg(not(windows))]
                 Route::Os => Err(os_route_unsupported()),
+                Route::Plugin => {
+                    self.plugin_key_cmd(chord, into.as_deref(), require_focus.as_deref())
+                        .await
+                }
             },
             Request::Hold {
                 chord,
@@ -514,11 +526,7 @@ impl State {
     async fn read_cmd(&self, target: &str) -> Outcome {
         let v = match self.page()? {
             (_, Page::Plugin(_)) if snapshot::is_ref(target) => {
-                return Err(Failure::new(
-                    Kind::Unsupported,
-                    format!("ref {target}: refs come with snapshot, not built on macOS yet (#14)"),
-                )
-                .with("ref", target));
+                return Err(refs_unsupported(target));
             }
             (_, page @ Page::Plugin(_)) => {
                 let js = format!(
@@ -556,27 +564,7 @@ impl State {
         let Some(sel) = require_focus else {
             return Ok(());
         };
-        let expr = format!(
-            "(() => {{
-                const r = document.querySelector({sel});
-                const a = document.activeElement;
-                const d = a ? a.tagName.toLowerCase() + (a.id ? '#' + a.id : '') : null;
-                return {{ matched: !!r, holds: !!(r && a && (r === a || r.contains(a))), active: d }};
-            }})()",
-            sel = json!(sel)
-        );
-        let v = evaluate(cdp, &expr).await?;
-        if v["holds"] == true {
-            return Ok(());
-        }
-        let message = if v["matched"] == true {
-            format!("focus is outside `{sel}`; nothing was sent")
-        } else {
-            format!("no element matches the required focus `{sel}`; nothing was sent")
-        };
-        Err(Failure::new(Kind::GuardRefused, message)
-            .with("expected", sel)
-            .with("found", v["active"].clone()))
+        focus_verdict(&evaluate(cdp, &focus_holds_js(sel)).await?, sel)
     }
 
     /// Refuses input into `obj` unless it lies inside the required focus selector; nothing on the page changes.
@@ -600,17 +588,7 @@ impl State {
             &[json!(sel)],
         )
         .await?;
-        if v["inside"] == true {
-            return Ok(());
-        }
-        let message = if v["matched"] == true {
-            format!("`{into}` is outside `{sel}`; nothing was sent")
-        } else {
-            format!("no element matches the required focus `{sel}`; nothing was sent")
-        };
-        Err(Failure::new(Kind::GuardRefused, message)
-            .with("expected", sel)
-            .with("found", into))
+        target_verdict(&v, into, sel)
     }
 
     /// Resolves `into` when given, checks the focus guard before anything changes, then focuses it;
@@ -1026,6 +1004,7 @@ impl State {
             }
             #[cfg(not(windows))]
             Route::Os => Err(os_route_unsupported()),
+            Route::Plugin => Err(crate::support::plugin_route_on_cdp()),
         }
     }
 }
@@ -1124,6 +1103,7 @@ impl State {
             }
             #[cfg(not(windows))]
             Route::Os => Err(os_route_unsupported()),
+            Route::Plugin => Err(crate::support::plugin_route_on_cdp()),
         }
     }
 }
@@ -1318,8 +1298,9 @@ pub(super) const NOTE_KEYDOWNS: &str = "const old = window.__pokitKeydowns; \
     const c = { codes: [] }; c.h = (e) => { if (e.isTrusted) c.codes.push(e.code); }; \
     window.addEventListener('keydown', c.h, true); window.__pokitKeydowns = c;";
 
-/// How long `check_delivery` waits for OS keys still on their way to reach the page.
-pub(super) const OS_KEYS_SETTLE_MS: u64 = 500;
+/// How long `check_delivery` waits for keys still on their way to the page after the command
+/// that sent them returned: OS input, and the plugin's.
+pub(super) const KEYS_SETTLE_MS: u64 = 500;
 
 /// Reads and removes the listener `NOTE_KEYDOWNS` installed, once a keydown has arrived for each
 /// of the `sent` codes or `settle_ms` has passed. When every key was sent (`sent_all`) and some
@@ -1333,11 +1314,15 @@ pub(super) async fn check_delivery(
     sent_all: bool,
     settle_ms: u64,
 ) -> Result<Fields, Failure> {
+    let read = evaluate(cdp, &delivery_js(sent, settle_ms)).await;
+    delivery_verdict(read, sent, sent_all)
+}
+
+/// The page script `check_delivery` reads the noted keydowns with.
+pub(super) fn delivery_js(sent: &[String], settle_ms: u64) -> String {
     let want = json!(sent);
-    let read = evaluate(
-        cdp,
-        &format!(
-            "new Promise((resolve) => {{ const c = window.__pokitKeydowns; \
+    format!(
+        "new Promise((resolve) => {{ const c = window.__pokitKeydowns; \
              if (!c) {{ resolve(null); return; }} \
              const until = performance.now() + {settle_ms}; \
              const arrived = () => {{ const left = {{}}; for (const k of {want}) left[k] = (left[k] || 0) + 1; \
@@ -1348,9 +1333,15 @@ pub(super) async fn check_delivery(
              resolve({{ codes: c.codes, frame: !!a && (a.tagName === 'IFRAME' || a.tagName === 'FRAME') }}); }}; \
              const poll = () => (arrived() || performance.now() >= until) ? done() : setTimeout(poll, 5); \
              poll(); }})"
-        ),
     )
-    .await;
+}
+
+/// What `check_delivery` makes of `read`, the page's answer to `delivery_js`.
+pub(super) fn delivery_verdict(
+    read: Result<Value, Failure>,
+    sent: &[String],
+    sent_all: bool,
+) -> Result<Fields, Failure> {
     let n = sent.len();
     let unverified = |why: &str| {
         Ok(fields! {
@@ -1445,6 +1436,50 @@ pub(super) fn exception_text(details: &Value) -> String {
         .to_string()
 }
 
+/// A page expression saying whether the focused element lies inside `sel`.
+pub(super) fn focus_holds_js(sel: &str) -> String {
+    format!(
+        "(() => {{
+            const r = document.querySelector({sel});
+            const a = document.activeElement;
+            const d = a ? a.tagName.toLowerCase() + (a.id ? '#' + a.id : '') : null;
+            return {{ matched: !!r, holds: !!(r && a && (r === a || r.contains(a))), active: d }};
+        }})()",
+        sel = json!(sel)
+    )
+}
+
+/// The guard's answer to `focus_holds_js`.
+pub(super) fn focus_verdict(v: &Value, sel: &str) -> Result<(), Failure> {
+    if v["holds"] == true {
+        return Ok(());
+    }
+    let message = if v["matched"] == true {
+        format!("focus is outside `{sel}`; nothing was sent")
+    } else {
+        format!("no element matches the required focus `{sel}`; nothing was sent")
+    };
+    Err(Failure::new(Kind::GuardRefused, message)
+        .with("expected", sel)
+        .with("found", v["active"].clone()))
+}
+
+/// The guard's answer for input into `into`, given whether the required focus `sel` matched
+/// and holds it (`matched`, `inside`).
+pub(super) fn target_verdict(v: &Value, into: &str, sel: &str) -> Result<(), Failure> {
+    if v["inside"] == true {
+        return Ok(());
+    }
+    let message = if v["matched"] == true {
+        format!("`{into}` is outside `{sel}`; nothing was sent")
+    } else {
+        format!("no element matches the required focus `{sel}`; nothing was sent")
+    };
+    Err(Failure::new(Kind::GuardRefused, message)
+        .with("expected", sel)
+        .with("found", into))
+}
+
 /// What `read` reports of an element, as a function called on it.
 const READ_ELEMENT: &str = "function() {
     const r = this.getBoundingClientRect();
@@ -1461,11 +1496,20 @@ const READ_ELEMENT: &str = "function() {
     };
 }";
 
-fn invalid_selector(target: &str, error: &str) -> Failure {
+/// A ref given to the plugin's session, which has no snapshot yet.
+pub(super) fn refs_unsupported(target: &str) -> Failure {
+    Failure::new(
+        Kind::Unsupported,
+        format!("ref {target}: refs come with snapshot, not built on macOS yet (#14)"),
+    )
+    .with("ref", target)
+}
+
+pub(super) fn invalid_selector(target: &str, error: &str) -> Failure {
     Failure::new(Kind::Error, format!("invalid selector `{target}`: {error}"))
 }
 
-fn no_match(target: &str) -> Failure {
+pub(super) fn no_match(target: &str) -> Failure {
     Failure::new(Kind::NotFound, format!("no element matches `{target}`")).with("selector", target)
 }
 

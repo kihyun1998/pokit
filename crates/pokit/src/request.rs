@@ -9,13 +9,28 @@ pub const HOLD_ACK_WAIT: Duration = Duration::from_secs(15);
 /// How much longer than its own timeout the CLI waits for `trace stop`, which reads the trace.
 pub const TRACE_STOP_WAIT: Duration = Duration::from_secs(60);
 
-/// How input reaches the page: CDP, straight into the page, or OS input through `SendInput`.
+/// How input reaches the page: CDP, straight into the page, OS input through `SendInput`, or the
+/// app's plugin delivering events to its own window (macOS). The default is the platform's own:
+/// CDP on Windows, the plugin on macOS.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum Route {
-    #[default]
+    #[cfg_attr(not(target_os = "macos"), default)]
     Cdp,
     Os,
+    #[cfg_attr(target_os = "macos", default)]
+    Plugin,
+}
+
+impl Route {
+    /// The route's name on the command line.
+    pub fn name(self) -> &'static str {
+        match self {
+            Route::Cdp => "cdp",
+            Route::Os => "os",
+            Route::Plugin => "plugin",
+        }
+    }
 }
 
 /// How long each measured run of `hold --compare` may wait for the page to settle.
@@ -226,6 +241,19 @@ impl Request {
     }
 
     /// Whether the command checks the keydowns the page receives against the keys it sends.
+    /// The input route the request names, for a command that sends input.
+    pub fn route(&self) -> Option<Route> {
+        match self {
+            Request::Click { route, .. }
+            | Request::Type { route, .. }
+            | Request::Key { route, .. }
+            | Request::Hold { route, .. }
+            | Request::Wheel { route, .. }
+            | Request::Drag { route, .. } => Some(*route),
+            _ => None,
+        }
+    }
+
     pub fn checks_keydowns(&self) -> bool {
         matches!(self, Request::Type { .. } | Request::Key { .. })
     }
