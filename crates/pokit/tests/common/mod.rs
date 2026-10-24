@@ -12,6 +12,36 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
 
+/// Whether `ci`, the value of the `CI` variable, says the run is on CI, where nobody uses the
+/// machine. GitHub Actions sets it to `true` on every run.
+pub fn is_ci(ci: Option<&str>) -> bool {
+    ci == Some("true")
+}
+
+/// Whether this run is on CI.
+pub fn on_ci() -> bool {
+    is_ci(std::env::var("CI").ok().as_deref())
+}
+
+/// For a test that judges only on a machine nobody is using: true on CI; elsewhere false, with a
+/// note that CI measures it. A test returns at once when it is false.
+pub fn quiet_machine(test: &str) -> bool {
+    if on_ci() {
+        return true;
+    }
+    eprintln!("{test}: needs a machine nobody is using; skipped here, measured on CI");
+    false
+}
+
+/// A test that cannot judge on this machine: a failure on CI, where nothing should stop it, and
+/// a note elsewhere.
+pub fn cannot_judge(why: &str) {
+    if on_ci() {
+        panic!("{why}, on CI");
+    }
+    eprintln!("{why}; nothing was checked");
+}
+
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")

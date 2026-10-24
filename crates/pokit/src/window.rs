@@ -188,6 +188,9 @@ mod win {
             ClientToScreen(widget, &mut corner).as_bool()
                 && GetClientRect(widget, &mut client).is_ok()
         };
+        if !ok {
+            return None;
+        }
         Some(Area {
             x: corner.x,
             y: corner.y,
@@ -195,7 +198,6 @@ mod win {
             height: client.bottom,
             scale: scale(root).ok()?,
         })
-        .filter(|_| ok)
     }
 
     /// Window `hwnd`'s page area now.
