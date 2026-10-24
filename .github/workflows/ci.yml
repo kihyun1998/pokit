@@ -24,12 +24,19 @@ jobs:
       - name: Runner
         shell: bash
         run: |
-          if [ "$RUNNER_OS" = macOS ]; then sw_vers; else cmd //c ver; fi
+          if [ "$RUNNER_OS" = macOS ]; then
+            sw_vers
+            lsappinfo info -only name "$(lsappinfo front)" || true
+            defaults read com.apple.HIToolbox AppleEnabledInputSources || true
+          else
+            cmd //c ver
+            reg query 'HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}' //v pv || echo "no WebView2 runtime (machine-wide)"
+          fi
           uname -m
           rustc --version
       - run: cargo fmt --all -- --check
         if: ${{ !cancelled() }}
       - run: cargo clippy --workspace --all-targets -- -D warnings
         if: ${{ !cancelled() }}
-      - run: cargo test --workspace
+      - run: cargo test --workspace --no-fail-fast
         if: ${{ !cancelled() }}
