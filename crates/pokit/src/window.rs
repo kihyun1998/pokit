@@ -369,10 +369,12 @@ mod win {
                     let from = (((y - r.top) * w + (left - r.left)) * 4) as usize;
                     let to = (((y - canvas.top) * cw + (left - canvas.left)) * 4) as usize;
                     for (dst, src) in rgba[to..to + span]
-                        .chunks_exact_mut(4)
-                        .zip(bgra[from..from + span].chunks_exact(4))
+                        .as_chunks_mut::<4>()
+                        .0
+                        .iter_mut()
+                        .zip(bgra[from..from + span].as_chunks::<4>().0)
                     {
-                        dst.copy_from_slice(&[src[2], src[1], src[0], 255]);
+                        *dst = [src[2], src[1], src[0], 255];
                     }
                 }
                 windows.push(Drawn {

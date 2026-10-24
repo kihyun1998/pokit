@@ -18,9 +18,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
+      - name: Toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - name: Runner
         shell: bash
@@ -29,5 +28,8 @@ jobs:
           uname -m
           rustc --version
       - run: cargo fmt --all -- --check
+        if: ${{ !cancelled() }}
       - run: cargo clippy --workspace --all-targets -- -D warnings
+        if: ${{ !cancelled() }}
       - run: cargo test --workspace
+        if: ${{ !cancelled() }}
