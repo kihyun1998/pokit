@@ -47,7 +47,7 @@ jobs:
             Start-Sleep 30
             $port = Get-ChildItem -Recurse $d -Filter DevToolsActivePort -ErrorAction SilentlyContinue | Select-Object -First 1
             $cmd = (Get-CimInstance Win32_Process -Filter "name='msedgewebview2.exe'" | Where-Object { $_.CommandLine -match '--embedded-browser-webview=1' -and $_.CommandLine -match [regex]::Escape($d) } | Select-Object -First 1).CommandLine
-            "== $name: alive=$(-not $p.HasExited) port=$(if ($port) { (Get-Content $port.FullName)[0] } else { 'none' }) debugging-arg=$($cmd -match 'remote-debugging-port')"
+            "== ${name}: alive=$(-not $p.HasExited) port=$(if ($port) { (Get-Content $port.FullName)[0] } else { 'none' }) debugging-arg=$($cmd -match 'remote-debugging-port')"
             Stop-Process $p -ErrorAction SilentlyContinue
             Get-Process msedgewebview2 -ErrorAction SilentlyContinue | Stop-Process -ErrorAction SilentlyContinue
             Start-Sleep 3
