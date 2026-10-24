@@ -12,6 +12,7 @@ mod native;
 mod os_input;
 mod page;
 mod pages;
+mod plugin_input;
 mod profiling;
 mod record;
 mod through_plugin;

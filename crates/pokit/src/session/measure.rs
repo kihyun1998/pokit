@@ -126,6 +126,7 @@ impl State {
                     "OS input is not built on this platform yet",
                 ))
             }
+            Route::Plugin => return Err(crate::support::plugin_route_on_cdp()),
         };
         let (target, _) = self.current()?;
         self.note_key_downs(&target, &sent[..hold.count as usize]);
@@ -136,7 +137,7 @@ impl State {
             "count" => hold.count,
             "interval_ms" => hold.interval_ms,
             "acknowledged" => acknowledged,
-            "route" => match hold.route { Route::Cdp => "cdp", Route::Os => "os" },
+            "route" => hold.route.name(),
         };
         Ok(self.stamp(f, &sent))
     }
@@ -240,12 +241,8 @@ impl State {
                 .await;
             held?;
             let m = stopped?;
-            let name = match route {
-                Route::Cdp => "cdp",
-                Route::Os => "os",
-            };
             runs.insert(
-                name.into(),
+                route.name().into(),
                 json!({ "latency": m["latency"], "keys": m["keys"], "frames": m["frames"] }),
             );
         }

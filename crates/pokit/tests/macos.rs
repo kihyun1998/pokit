@@ -87,6 +87,165 @@ fn eval_runs_in_the_page_and_close_ends_the_app() {
 }
 
 #[test]
+fn type_and_key_reach_the_page_behind_another_app_and_leave_the_front_and_the_cursor_alone() {
+    let _front = FRONTMOST.lock().unwrap_or_else(|e| e.into_inner());
+    let p = Pokit::launch_fixture("mac-type");
+    let watching = Arc::new(AtomicBool::new(true));
+    let fronts = {
+        let watching = watching.clone();
+        std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            while watching.load(Ordering::SeqCst) {
+                if let Some(pid) = frontmost_pid() {
+                    if seen.last() != Some(&pid) {
+                        seen.push(pid);
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            seen
+        })
+    };
+    // The cursor is read just before and after each input command.
+    let moved = std::cell::RefCell::new(Vec::new());
+    let input = |args: &[&str]| {
+        let (before, start) = (cursor_location(), std::time::Instant::now());
+        let r = p.run(args);
+        let after = cursor_location();
+        if after != before {
+            moved.borrow_mut().push((
+                format!("{args:?}: {before:?} -> {after:?}"),
+                start.elapsed(),
+            ));
+        }
+        r
+    };
+
+    let r = input(&["type", "kim", "--into", "#name"]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert_eq!(r.out["engine"], "plugin", "{}", r.out);
+    assert_eq!(r.out["key_events"], 3, "{}", r.out);
+    assert_eq!(r.out["keydowns_sent"], 3, "{}", r.out);
+    assert_eq!(r.out["keydowns_received"], 3, "{}", r.out);
+    assert_eq!(r.out["delivery"], "confirmed", "{}", r.out);
+    assert_eq!(p.run(&["read", "#name"]).out["value"], "kim");
+
+    let r = input(&["type", " Kim é한", "--into", "#other-input"]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert_eq!(r.out["inserted_chars"], 2, "{}", r.out);
+    assert_eq!(r.out["keydowns_sent"], 6, "{}", r.out);
+    assert_eq!(p.run(&["read", "#other-input"]).out["value"], " Kim é한");
+
+    let r = input(&["key", "Ctrl+Shift+KeyT", "--into", "#name"]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert_eq!(r.out["code"], "KeyT", "{}", r.out);
+    assert_eq!(r.out["keydowns_received"], 3, "{}", r.out);
+    assert_eq!(p.run(&["read", "#last-key"]).out["text"], "Ctrl+Shift+KeyT");
+
+    let r = input(&["key", "Backspace"]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert_eq!(p.run(&["read", "#name"]).out["value"], "ki");
+
+    watching.store(false, Ordering::SeqCst);
+    let fronts = fronts.join().unwrap();
+    assert!(
+        !fronts.contains(&p.app_pid()),
+        "input brought the app (pid {}) to the front; frontmost pids in order: {fronts:?}",
+        p.app_pid()
+    );
+    let moved = moved.into_inner();
+    if let Some((_, took)) = moved.iter().max_by_key(|(_, took)| *took) {
+        // A cursor that also moves with no input sent is a hand on the mouse.
+        let before = cursor_location();
+        std::thread::sleep(*took);
+        if cursor_location() != before {
+            eprintln!("the mouse is in use; the cursor was not checked: {moved:?}");
+            return;
+        }
+        panic!("the cursor moved during input: {moved:?}");
+    }
+}
+
+#[test]
+fn inserted_text_keeps_its_place_behind_keys_a_busy_page_has_not_handled_yet() {
+    let p = Pokit::launch_fixture("mac-type-order");
+    for _ in 0..3 {
+        let r = p.run(&[
+            "eval",
+            "window.__stallMs = 30; document.querySelector('#stall').value = ''",
+        ]);
+        assert_eq!(r.code, 0, "{}", r.out);
+        let r = p.run(&["type", "abcé", "--into", "#stall"]);
+        assert_eq!(r.code, 0, "{}", r.out);
+        assert_eq!(p.run(&["read", "#stall"]).out["value"], "abcé");
+    }
+}
+
+#[test]
+fn typed_text_arrives_as_given_under_a_korean_input_source() {
+    let p = Pokit::launch_fixture("mac-input-source");
+    let Some(_korean) = InputSource::select("com.apple.inputmethod.Korean.2SetKorean") else {
+        eprintln!("2-Set Korean is not an enabled input source; nothing to check");
+        return;
+    };
+    let r = p.run(&["type", "abc", "--into", "#name"]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert_eq!(p.run(&["read", "#name"]).out["value"], "abc");
+}
+
+#[test]
+fn input_refuses_what_macos_cannot_take_and_masks_a_secret() {
+    let secret = "hunter2-secret";
+    let p = Pokit::launch_fixture("mac-type-secret");
+    let r = p.run_with_stdin(&["type", "--secret", "--into", "#password"], Some(secret));
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert!(!r.out.to_string().contains(secret), "{}", r.out);
+    let read = p.run(&["read", "#password"]);
+    assert_eq!(read.out["value"], "***", "{}", read.out);
+    assert!(
+        p.all_written_text().contains("\"type\""),
+        "the record holds the type command"
+    );
+    assert!(
+        !p.all_written_text().contains(secret),
+        "the run record leaked the secret"
+    );
+
+    for args in [
+        &["type", "x", "--route", "cdp"][..],
+        &["key", "KeyA", "--route", "os"][..],
+        &["type", "x", "--into", "e3"][..],
+    ] {
+        let r = p.run(args);
+        assert_eq!(r.code, UNSUPPORTED, "{args:?}: {}", r.out);
+    }
+
+    let r = p.run(&[
+        "type",
+        "x",
+        "--into",
+        "#name",
+        "--require-focus",
+        "#pane-other",
+    ]);
+    assert_eq!(r.code, 6, "{}", r.out);
+    assert_eq!(r.out["error"]["kind"], "guard_refused", "{}", r.out);
+    let r = p.run(&["key", "KeyA", "--into", "#nothing-here"]);
+    assert_eq!(r.out["error"]["kind"], "not_found", "{}", r.out);
+
+    let caps = p.run(&["capabilities"]).out;
+    for command in ["key", "type"] {
+        let c = &caps["commands"][command];
+        assert_eq!(c["supported"], true, "{command}: {c}");
+        assert_eq!(c["routes"]["plugin"]["default"], true, "{command}: {c}");
+        assert_eq!(
+            c["routes"]["plugin"]["takes_focus"], false,
+            "{command}: {c}"
+        );
+    }
+}
+
+#[test]
 fn read_by_selector_returns_the_fields_windows_does() {
     let p = Pokit::launch_fixture("mac-read");
     let r = p.run(&[
@@ -510,4 +669,108 @@ fn run_text(program: &str, args: &[&str]) -> String {
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Where the cursor is, in global display points.
+fn cursor_location() -> (f64, f64) {
+    #[repr(C)]
+    struct Point {
+        x: f64,
+        y: f64,
+    }
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn CGEventCreate(source: *const std::ffi::c_void) -> *const std::ffi::c_void;
+        fn CGEventGetLocation(event: *const std::ffi::c_void) -> Point;
+        fn CFRelease(object: *const std::ffi::c_void);
+    }
+    // SAFETY: an event made with no source only reads the current cursor; it is released here.
+    unsafe {
+        let event = CGEventCreate(std::ptr::null());
+        let at = CGEventGetLocation(event);
+        CFRelease(event);
+        (at.x, at.y)
+    }
+}
+
+/// An input source selected for a test; the one selected before is selected again on drop.
+struct InputSource {
+    before: *const std::ffi::c_void,
+}
+
+#[link(name = "Carbon", kind = "framework")]
+extern "C" {
+    fn TISCopyCurrentKeyboardInputSource() -> *const std::ffi::c_void;
+    fn TISCreateInputSourceList(
+        properties: *const std::ffi::c_void,
+        include_all: bool,
+    ) -> *const std::ffi::c_void;
+    fn TISGetInputSourceProperty(
+        source: *const std::ffi::c_void,
+        key: *const std::ffi::c_void,
+    ) -> *const std::ffi::c_void;
+    fn TISSelectInputSource(source: *const std::ffi::c_void) -> i32;
+    static kTISPropertyInputSourceID: *const std::ffi::c_void;
+}
+
+#[link(name = "CoreFoundation", kind = "framework")]
+extern "C" {
+    fn CFArrayGetCount(array: *const std::ffi::c_void) -> isize;
+    fn CFArrayGetValueAtIndex(array: *const std::ffi::c_void, i: isize) -> *const std::ffi::c_void;
+    fn CFStringGetCString(
+        string: *const std::ffi::c_void,
+        buffer: *mut std::ffi::c_char,
+        size: isize,
+        encoding: u32,
+    ) -> bool;
+    fn CFRelease(object: *const std::ffi::c_void);
+}
+
+impl InputSource {
+    /// Selects the enabled input source `id`; `None` when it is not enabled or did not take.
+    fn select(id: &str) -> Option<InputSource> {
+        // SAFETY: Carbon's input source calls on objects it returns; each one copied or created
+        // here is released, the current source on drop.
+        unsafe {
+            let list = TISCreateInputSourceList(std::ptr::null(), false);
+            let found = (0..CFArrayGetCount(list))
+                .map(|i| CFArrayGetValueAtIndex(list, i))
+                .find(|s| source_id(*s).as_deref() == Some(id));
+            let selected = found.map(|source| {
+                let before = TISCopyCurrentKeyboardInputSource();
+                (TISSelectInputSource(source) == 0).then_some(InputSource { before })
+            });
+            CFRelease(list);
+            let selected = selected.flatten()?;
+            let now = TISCopyCurrentKeyboardInputSource();
+            let took = source_id(now).as_deref() == Some(id);
+            CFRelease(now);
+            took.then_some(selected)
+        }
+    }
+}
+
+impl Drop for InputSource {
+    fn drop(&mut self) {
+        // SAFETY: `before` is the source copied in `select`, released once here.
+        unsafe {
+            TISSelectInputSource(self.before);
+            CFRelease(self.before);
+        }
+    }
+}
+
+/// An input source's identifier.
+unsafe fn source_id(source: *const std::ffi::c_void) -> Option<String> {
+    let id = TISGetInputSourceProperty(source, kTISPropertyInputSourceID);
+    if id.is_null() {
+        return None;
+    }
+    let mut buffer = [0 as std::ffi::c_char; 256];
+    const UTF8: u32 = 0x0800_0100;
+    CFStringGetCString(id, buffer.as_mut_ptr(), buffer.len() as isize, UTF8).then(|| {
+        std::ffi::CStr::from_ptr(buffer.as_ptr())
+            .to_string_lossy()
+            .into_owned()
+    })
 }

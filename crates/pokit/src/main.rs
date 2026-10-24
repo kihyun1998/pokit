@@ -243,7 +243,7 @@ enum Command {
         #[arg(long)]
         require_focus: Option<String>,
         /// `os` sends OS input, which needs the app in front (`window activate`) and moves the cursor.
-        #[arg(long, value_enum, default_value_t = request::Route::Cdp)]
+        #[arg(long, value_enum, default_value_t = request::Route::default())]
         route: request::Route,
     },
     /// Type text into the focused element, or into `--into`.
@@ -260,7 +260,7 @@ enum Command {
         #[arg(long)]
         require_focus: Option<String>,
         /// `os` types through the OS, which needs the app in front, without IME composition.
-        #[arg(long, value_enum, default_value_t = request::Route::Cdp)]
+        #[arg(long, value_enum, default_value_t = request::Route::default())]
         route: request::Route,
     },
     /// Press a chord written with physical key names, e.g. `Ctrl+Equal`, into the focused element or `--into`.
@@ -271,7 +271,7 @@ enum Command {
         #[arg(long)]
         require_focus: Option<String>,
         /// `os` presses the keys through the OS, which needs the app in front.
-        #[arg(long, value_enum, default_value_t = request::Route::Cdp)]
+        #[arg(long, value_enum, default_value_t = request::Route::default())]
         route: request::Route,
     },
     /// Send N key-downs at a fixed interval without waiting for the page, then one key-up.
@@ -287,7 +287,7 @@ enum Command {
         #[arg(long)]
         require_focus: Option<String>,
         /// `os` sends the keys through the OS, which needs the app in front (`window activate`).
-        #[arg(long, value_enum, default_value_t = request::Route::Cdp)]
+        #[arg(long, value_enum, default_value_t = request::Route::default())]
         route: request::Route,
         /// Run the same keys on CDP, then on the OS, each measured, and report each route's
         /// send-to-handling latency and their difference. Needs the app in front.
@@ -313,7 +313,7 @@ enum Command {
         #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u32).range(1..=1000))]
         steps: u32,
         /// `os` drags through the OS, which needs the app in front and moves the cursor.
-        #[arg(long, value_enum, default_value_t = request::Route::Cdp)]
+        #[arg(long, value_enum, default_value_t = request::Route::default())]
         route: request::Route,
     },
     /// Turn the mouse wheel over an element or a point, or the middle of the page.
@@ -327,7 +327,7 @@ enum Command {
         #[arg(long, allow_hyphen_values = true)]
         notches: i32,
         /// `os` turns the wheel through the OS, which needs the app in front and moves the cursor.
-        #[arg(long, value_enum, default_value_t = request::Route::Cdp)]
+        #[arg(long, value_enum, default_value_t = request::Route::default())]
         route: request::Route,
     },
     /// Probe frames, keys and an optional element between `measure start` and `measure stop`.
