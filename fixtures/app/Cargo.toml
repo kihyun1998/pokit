@@ -2,6 +2,7 @@
 name = "pokit-fixture"
 version = "0.0.0"
 edition = "2021"
+description = "The fixture app pokit's tests drive."
 publish = false
 
 [build-dependencies]

@@ -1,4 +1,6 @@
 The territory map. A comment's why, trap and measured value go to a note here.
+Before starting a note, search this folder and the code symbol for one that
+already holds it; name a new note for what the system does there, not for the file.
 Notes are added as they come up, or all at once with `grill-map`, which also
 brings hand-written notes into its format.
 
