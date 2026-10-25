@@ -1,8 +1,9 @@
-//! Delivering key events and text to a webview's own window, from inside the app.
+//! Delivering key events and text to a webview's own window, and mouse events to the view under
+//! a point, from inside the app.
 
 use crate::channel::failure;
 use objc2::msg_send;
-use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType};
+use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType, NSView};
 use objc2_foundation::{MainThreadMarker, NSNotFound, NSPoint, NSProcessInfo, NSRange, NSString};
 use objc2_web_kit::WKWebView;
 use serde_json::{json, Value};
@@ -26,6 +27,14 @@ enum Event {
     },
     /// Text given to the webview's `insertText:replacementRange:`, as an input method commits it.
     Insert(String),
+    /// A mouse event at a point of the page (CSS pixels from its top left), given to the view under
+    /// it.
+    Mouse {
+        kind: NSEventType,
+        x: f64,
+        y: f64,
+        clicks: isize,
+    },
 }
 
 fn parse(event: &Value) -> Result<Event, String> {
@@ -33,6 +42,31 @@ fn parse(event: &Value) -> Result<Event, String> {
         Some("insert") => {
             let text = event["text"].as_str().ok_or("insert needs `text`")?;
             return Ok(Event::Insert(text.to_string()));
+        }
+        Some(mouse @ ("mousedown" | "mouseup" | "mousemove")) => {
+            let right = match event["button"].as_str() {
+                None | Some("left") => false,
+                Some("right") => true,
+                Some(other) => return Err(format!("unknown button {other:?}")),
+            };
+            let kind = match (mouse, right) {
+                ("mousedown", false) => NSEventType::LeftMouseDown,
+                ("mousedown", true) => NSEventType::RightMouseDown,
+                ("mouseup", false) => NSEventType::LeftMouseUp,
+                ("mouseup", true) => NSEventType::RightMouseUp,
+                _ => NSEventType::LeftMouseDragged,
+            };
+            let at = |name: &str| {
+                event[name]
+                    .as_f64()
+                    .ok_or(format!("a mouse event needs `{name}`"))
+            };
+            return Ok(Event::Mouse {
+                kind,
+                x: at("x")?,
+                y: at("y")?,
+                clicks: event["clicks"].as_i64().unwrap_or(0) as isize,
+            });
         }
         Some("keydown") => NSEventType::KeyDown,
         Some("keyup") => NSEventType::KeyUp,
@@ -54,6 +88,28 @@ fn parse(event: &Value) -> Result<Event, String> {
     })
 }
 
+/// The window point under page point (`x`, `y`), in CSS pixels from the page's top left.
+fn window_point(view: &WKWebView, x: f64, y: f64) -> NSPoint {
+    // SAFETY: plain property reads on the main thread.
+    let scale = unsafe { view.pageZoom() * view.magnification() };
+    let inset = view.safeAreaInsets();
+    view.convertPoint_toView(
+        NSPoint::new(inset.left + x * scale, inset.top + y * scale),
+        None,
+    )
+}
+
+/// Gives `event` to `view`'s handler for its kind, as AppKit does for a click on the view.
+fn give(view: &NSView, kind: NSEventType, event: &NSEvent) {
+    match kind {
+        NSEventType::LeftMouseDown => view.mouseDown(event),
+        NSEventType::LeftMouseUp => view.mouseUp(event),
+        NSEventType::RightMouseDown => view.rightMouseDown(event),
+        NSEventType::RightMouseUp => view.rightMouseUp(event),
+        _ => view.mouseDragged(event),
+    }
+}
+
 /// Delivers `events` in order to `webview`'s window, on the main thread.
 pub fn deliver<R: Runtime>(webview: &WebviewWindow<R>, events: &[Value]) -> Value {
     let events = match events.iter().map(parse).collect::<Result<Vec<_>, _>>() {
@@ -67,6 +123,7 @@ pub fn deliver<R: Runtime>(webview: &WebviewWindow<R>, events: &[Value]) -> Valu
             // SAFETY: on macOS `inner` is this webview's live WKWebView, and we are on the main thread.
             let view: &WKWebView = unsafe { &*(platform.inner() as *const WKWebView) };
             let window = view.window().ok_or("the webview is not in a window")?;
+            let mut menu_watch = None;
             for event in &events {
                 match event {
                     Event::Key {
@@ -99,9 +156,36 @@ pub fn deliver<R: Runtime>(webview: &WebviewWindow<R>, events: &[Value]) -> Valu
                         // SAFETY: WKWebView implements NSTextInputClient's insertText:replacementRange:.
                         let _: () = unsafe { msg_send![view, insertText: &*text, replacementRange: nowhere] };
                     }
+                    Event::Mouse { kind, x, y, clicks } => {
+                        let at = window_point(view, *x, *y);
+                        let content = window.contentView().ok_or("the window has no content view")?;
+                        // SAFETY: on the main thread, reading the view hierarchy.
+                        let frame = unsafe { content.superview() }.unwrap_or_else(|| content.clone());
+                        let target = content
+                            .hitTest(frame.convertPoint_fromView(at, None))
+                            .filter(|hit| hit.isDescendantOf(view))
+                            .ok_or("the point is not over the page")?;
+                        let pressure = if matches!(*kind, NSEventType::LeftMouseDown | NSEventType::RightMouseDown) { 1.0 } else { 0.0 };
+                        let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+                            *kind,
+                            at,
+                            NSEventModifierFlags(0),
+                            NSProcessInfo::processInfo().systemUptime(),
+                            window.windowNumber(),
+                            None,
+                            0,
+                            *clicks,
+                            pressure,
+                        )
+                        .ok_or("AppKit made no mouse event")?;
+                        if *kind == NSEventType::RightMouseDown {
+                            menu_watch = Some(crate::menu::arm());
+                        }
+                        give(&target, *kind, &event);
+                    }
                 }
             }
-            Ok::<Value, &str>(json!({ "ok": true }))
+            Ok::<Value, &str>(json!({ "ok": true, "menu_watch": menu_watch }))
         })();
         let _ = tx.send(reply.unwrap_or_else(|e| failure("error", e)));
     });

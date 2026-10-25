@@ -10,6 +10,7 @@ const ON_MACOS: &[&str] = &[
     "eval",
     "read",
     "wait",
+    "click",
     "key",
     "type",
 ];
@@ -54,6 +55,13 @@ pub fn routes(command: &str) -> Option<serde_json::Value> {
             "cdp": { "default": true, "takes_focus": false, "ime_composition": true },
             "os": { "takes_focus": true, "needs": "the app in front: `window activate`", "ime_composition": false },
         })),
+        "click" if cfg!(target_os = "macos") => Some(json!({
+            "plugin": {
+                "default": true,
+                "takes_focus": false,
+                "right_click_menu": "the menu WebKit opens, when the page does not prevent it, is closed at once (`menu_closed`); a menu the app opens stays",
+            },
+        })),
         "key" if cfg!(target_os = "macos") => Some(json!({
             "plugin": { "default": true, "takes_focus": false },
         })),
@@ -86,13 +94,18 @@ pub fn reason(command: &str) -> &'static str {
     }
 }
 
-/// Why a session refuses input by `route`: the plugin's session takes only the plugin route, a
-/// CDP session every route but the plugin's. `None` when it takes it.
-pub fn route_refused(route: crate::request::Route, through_plugin: bool) -> Option<Failure> {
+/// Why a session refuses `command`'s input by `route`: the plugin's session takes only the plugin
+/// route, a CDP session every route but the plugin's. `None` when it takes it.
+pub fn route_refused(
+    route: crate::request::Route,
+    through_plugin: bool,
+    command: &str,
+) -> Option<Failure> {
     use crate::request::Route;
     let why = match (route, through_plugin) {
         (Route::Plugin, true) | (Route::Cdp | Route::Os, false) => return None,
         (Route::Cdp, true) => "there is no CDP on macOS: input goes through the app's plugin, the default route (`--route plugin`)",
+        (Route::Os, true) if command == "click" => "there is no OS click on macOS that leaves the cursor alone: clicks go through the app's plugin (`--route plugin`)",
         (Route::Os, true) => "OS input is not built on macOS yet",
         (Route::Plugin, false) => return Some(plugin_route_on_cdp()),
     };
@@ -123,6 +136,20 @@ mod tests {
         assert_eq!(command_of("trace_start"), "trace");
         assert_eq!(command_of("measure_stop"), "measure");
         assert_eq!(command_of("eval"), "eval");
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_clicks_through_the_plugin_and_names_no_os_route() {
+        assert!(answers("click") && plugin_answers("click"));
+        let routes = routes("click").unwrap();
+        assert_eq!(routes["plugin"]["default"], true);
+        assert_eq!(routes["plugin"]["takes_focus"], false);
+        assert!(routes.get("os").is_none(), "{routes}");
+        let os = route_refused(crate::request::Route::Os, true, "click").unwrap();
+        assert!(os.message.contains("cursor"), "{}", os.message);
+        let key = route_refused(crate::request::Route::Os, true, "key").unwrap();
+        assert!(key.message.contains("not built"), "{}", key.message);
     }
 
     #[test]

@@ -81,14 +81,25 @@ impl Plugin {
         Ok(reply["value"].clone())
     }
 
-    /// Delivers `events` (key events and text, as the plugin's `input` takes them) to webview
-    /// `label`'s window, in order.
-    pub async fn input(&self, label: &str, events: Value) -> Result<(), Failure> {
+    /// Delivers `events` (key, text and mouse events, as the plugin's `input` takes them) to
+    /// webview `label`, in order. The reply carries `menu_watch` when one was a right-click.
+    pub async fn input(&self, label: &str, events: Value) -> Result<Value, Failure> {
         self.request(
             json!({ "op": "input", "webview": label, "events": events }),
             INPUT_TIMEOUT,
         )
-        .await?;
-        Ok(())
+        .await
+    }
+
+    /// Waits up to `wait` for a menu right-click `watch` opened, closes it, and says whether it
+    /// did.
+    pub async fn close_menu(&self, watch: u64, wait: Duration) -> Result<bool, Failure> {
+        let reply = self
+            .request(
+                json!({ "op": "menu", "watch": watch, "wait_ms": wait.as_millis() as u64 }),
+                wait,
+            )
+            .await?;
+        Ok(reply["closed"] == true)
     }
 }

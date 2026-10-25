@@ -13,6 +13,8 @@ const MAX_REQUEST: u64 = 4 << 20;
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long the channel waits before accepting again after a failed accept.
 const ACCEPT_RETRY: Duration = Duration::from_millis(50);
+/// The longest a `menu` request may wait for a right-click's menu.
+const MAX_MENU_WAIT_MS: u64 = 10_000;
 /// How long an `eval` may take when the request names no timeout.
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
@@ -132,6 +134,16 @@ fn answer<R: Runtime>(app: &AppHandle<R>, request: &Value) -> Value {
             };
             deliver(&webview, events)
         }
+        Some("menu") => {
+            let Some(watch) = request["watch"].as_u64() else {
+                return failure("bad_request", "menu needs `watch`");
+            };
+            let wait = request["wait_ms"]
+                .as_u64()
+                .unwrap_or(0)
+                .min(MAX_MENU_WAIT_MS);
+            menu_closed(watch, Duration::from_millis(wait))
+        }
         other => failure("bad_request", format!("unknown op {other:?}")),
     }
 }
@@ -144,6 +156,16 @@ fn deliver<R: Runtime>(webview: &tauri::WebviewWindow<R>, events: &[Value]) -> V
 #[cfg(not(target_os = "macos"))]
 fn deliver<R: Runtime>(_webview: &tauri::WebviewWindow<R>, _events: &[Value]) -> Value {
     failure("unsupported", "the plugin delivers input on macOS only")
+}
+
+#[cfg(target_os = "macos")]
+fn menu_closed(watch: u64, wait: Duration) -> Value {
+    crate::menu::close(watch, wait)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn menu_closed(_watch: u64, _wait: Duration) -> Value {
+    failure("unsupported", "the plugin watches menus on macOS only")
 }
 
 #[cfg(target_os = "macos")]
