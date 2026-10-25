@@ -76,9 +76,13 @@ impl State {
         } else {
             None
         };
-        let wrong_route = request
-            .route()
-            .and_then(|r| crate::support::route_refused(r, self.plugin.is_some()));
+        let wrong_route = request.route().and_then(|r| {
+            crate::support::route_refused(
+                r,
+                self.plugin.is_some(),
+                crate::support::command_of(kind.name()),
+            )
+        });
         let outcome =
             RESOLVED
                 .scope(Resolved::new(), async {
@@ -124,7 +128,12 @@ impl State {
                     hover: *hover,
                     route: *route,
                 };
-                self.click_cmd(at, how, require_focus.as_deref()).await
+                if how.route == Route::Plugin {
+                    self.plugin_click_cmd(at, how, require_focus.as_deref())
+                        .await
+                } else {
+                    self.click_cmd(at, how, require_focus.as_deref()).await
+                }
             }
             Request::Type {
                 text,
@@ -1117,7 +1126,7 @@ fn refused_unless_front(
 }
 
 /// Where a click lands: an element (a ref or selector), or a point in the page.
-enum ClickAt<'a> {
+pub(super) enum ClickAt<'a> {
     Element(&'a str),
     Point(f64, f64),
 }
@@ -1303,7 +1312,8 @@ pub(super) const NOTE_KEYDOWNS: &str = "const old = window.__pokitKeydowns; \
 #[cfg(windows)]
 pub(super) const KEYS_SETTLE_MS: u64 = 500;
 
-/// How long the plugin route waits for its keys to reach the page after it sent them.
+/// How long the plugin route waits for the events it sent to reach the page: its keys, and a
+/// right-click's `contextmenu`.
 pub(super) const PLUGIN_KEYS_SETTLE_MS: u64 = 2000;
 
 /// Reads and removes the listener `NOTE_KEYDOWNS` installed, once a keydown has arrived for each

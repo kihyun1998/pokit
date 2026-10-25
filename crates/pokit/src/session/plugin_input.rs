@@ -1,9 +1,11 @@
-//! Input on the plugin route (macOS): the app's plugin delivers key events to its own window, and
-//! text the US layout has no key for to the webview as an input method commits it.
+//! Input on the plugin route (macOS): the app's plugin delivers key events to its own window, text
+//! the US layout has no key for to the webview as an input method commits it, and mouse events to
+//! the view under the point.
 
 use super::commands::{
     delivery_js, delivery_verdict, focus_holds_js, focus_verdict, invalid_selector, no_match,
-    refs_unsupported, target_verdict, EVALUATE_TIMEOUT, NOTE_KEYDOWNS, PLUGIN_KEYS_SETTLE_MS,
+    refs_unsupported, target_verdict, ClickAt, ClickHow, EVALUATE_TIMEOUT, NOTE_KEYDOWNS,
+    PLUGIN_KEYS_SETTLE_MS,
 };
 use super::page::{Page, PluginPage};
 use super::State;
@@ -12,7 +14,7 @@ use crate::fields;
 use crate::output::{Failure, Fields, Kind, Outcome};
 use crate::snapshot;
 use serde_json::{json, Value};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 impl State {
     pub(super) async fn plugin_type_cmd(
@@ -39,7 +41,7 @@ impl State {
                     keys_handled(page, downs.len()).await;
                     let insert = json!([{ "type": "insert", "text": c.to_string() }]);
                     sent.push(Instant::now());
-                    page.plugin.input(&page.webview, insert).await
+                    page.plugin.input(&page.webview, insert).await.map(drop)
                 }
             };
             if typed.is_err() {
@@ -85,6 +87,116 @@ impl State {
         let mut f =
             fields! { "key" => press.key, "code" => press.code, "modifiers" => press.modifiers };
         f.extend(delivery?);
+        Ok(self.stamp(f, &sent))
+    }
+
+    pub(super) async fn plugin_click_cmd(
+        &self,
+        at: Option<ClickAt<'_>>,
+        how: ClickHow,
+        require_focus: Option<&str>,
+    ) -> Outcome {
+        let p = self
+            .plugin
+            .as_ref()
+            .ok_or_else(|| Failure::new(Kind::Error, "this session has no plugin"))?;
+        let page = Page::Plugin(p);
+        let right_click = how.right && !how.hover;
+        let note = if right_click {
+            format!("{NOTE_MOUSE} {NOTE_CONTEXTMENU}")
+        } else {
+            NOTE_MOUSE.to_string()
+        };
+        let (x, y) = match at {
+            Some(ClickAt::Element(t)) if snapshot::is_ref(t) => return Err(refs_unsupported(t)),
+            Some(ClickAt::Element(t)) => {
+                self.plugin_guard_focus(&page, require_focus).await?;
+                let js = format!(
+                    "(() => {{
+                        let el;
+                        try {{ el = document.querySelector({t}); }}
+                        catch (e) {{ return {{ invalid: String(e) }}; }}
+                        if (!el) return {{}};
+                        el.scrollIntoView({{ block: 'center', inline: 'center' }});
+                        const r = el.getBoundingClientRect();
+                        {note}
+                        return {{ left: r.left, top: r.top, width: r.width, height: r.height }};
+                    }})()",
+                    t = json!(t),
+                );
+                let r = page.eval(&js, EVALUATE_TIMEOUT).await?;
+                if let Some(e) = r["invalid"].as_str() {
+                    return Err(invalid_selector(t, e));
+                }
+                let (Some(left), Some(top)) = (r["left"].as_f64(), r["top"].as_f64()) else {
+                    return Err(no_match(t));
+                };
+                let (width, height) = (
+                    r["width"].as_f64().unwrap_or(0.0),
+                    r["height"].as_f64().unwrap_or(0.0),
+                );
+                if width == 0.0 && height == 0.0 {
+                    return Err(Failure::new(
+                        Kind::NotFound,
+                        format!("`{t}` has no size on screen"),
+                    ));
+                }
+                (left + width / 2.0, top + height / 2.0)
+            }
+            Some(ClickAt::Point(x, y)) => {
+                self.plugin_guard_focus(&page, require_focus).await?;
+                page.eval(
+                    &format!("(() => {{ {note} return true; }})()"),
+                    EVALUATE_TIMEOUT,
+                )
+                .await?;
+                (x, y)
+            }
+            None => {
+                return Err(Failure::new(
+                    Kind::Error,
+                    "click needs a ref, a selector, or --x and --y",
+                ))
+            }
+        };
+        let mouse = |kind: &str, clicks: i64| {
+            let button = if how.right { "right" } else { "left" };
+            json!([{ "type": kind, "x": x, "y": y, "button": button, "clicks": clicks }])
+        };
+        let mut sent = Vec::new();
+        let mut watch = None;
+        let pressed = async {
+            sent.push(Instant::now());
+            p.plugin.input(&p.webview, mouse("mousemove", 0)).await?;
+            if how.hover {
+                return Ok("hover");
+            }
+            let count = if how.double { 2 } else { 1 };
+            for n in 1..=count {
+                sent.push(Instant::now());
+                let reply = p.plugin.input(&p.webview, mouse("mousedown", n)).await?;
+                watch = watch.or(reply["menu_watch"].as_u64());
+                sent.push(Instant::now());
+                p.plugin.input(&p.webview, mouse("mouseup", n)).await?;
+            }
+            Ok::<_, Failure>(match (how.right, count) {
+                (true, _) => "right_click",
+                (_, 2) => "double_click",
+                _ => "click",
+            })
+        }
+        .await;
+        if let Ok(action) = pressed {
+            mouse_handled(p, action, if how.double { 2 } else { 1 }).await;
+        }
+        let menu_closed = match right_click {
+            true => Some(close_menu(p, watch).await),
+            false => None,
+        };
+        let mut f = fields! { "action" => pressed?, "x" => x, "y" => y };
+        if let Some(closed) = menu_closed {
+            f.insert("menu_closed".into(), json!(closed?));
+        }
         Ok(self.stamp(f, &sent))
     }
 
@@ -195,4 +307,56 @@ async fn delivery(page: &PluginPage, downs: &[String], sent_all: bool) -> Result
         .eval(&delivery_js(downs, PLUGIN_KEYS_SETTLE_MS), EVALUATE_TIMEOUT)
         .await;
     delivery_verdict(read, downs, sent_all)
+}
+
+/// Counts the trusted mouse events that end each kind of click, in a capture listener on
+/// `window`, for `mouse_handled` to wait on.
+const NOTE_MOUSE: &str = "const old = window.__pokitMouse; \
+    if (old) for (const t of ['mousemove', 'mouseup', 'contextmenu']) window.removeEventListener(t, old.h, true); \
+    const m = { mousemove: 0, mouseup: 0, contextmenu: 0 }; m.h = (e) => { if (e.isTrusted) m[e.type] += 1; }; \
+    for (const t of ['mousemove', 'mouseup', 'contextmenu']) window.addEventListener(t, m.h, true); \
+    window.__pokitMouse = m;";
+
+/// Waits, up to `PLUGIN_KEYS_SETTLE_MS`, until the page has handled the events that end
+/// `action`: the move of a hover, the `n`th release of a click, the `contextmenu` of a
+/// right-click.
+async fn mouse_handled(page: &PluginPage, action: &str, n: usize) {
+    let (kind, n) = match action {
+        "hover" => ("mousemove", 1),
+        "right_click" => ("contextmenu", 1),
+        _ => ("mouseup", n),
+    };
+    let js = format!(
+        "new Promise((resolve) => {{ const until = performance.now() + {PLUGIN_KEYS_SETTLE_MS}; \
+         const poll = () => {{ const m = window.__pokitMouse; \
+         (!m || m.{kind} >= {n} || performance.now() >= until) ? resolve(true) : setTimeout(poll, 2); }}; \
+         poll(); }})"
+    );
+    let _ = Page::Plugin(page).eval(&js, EVALUATE_TIMEOUT).await;
+}
+
+/// Notes the next trusted `contextmenu` on the page, to read whether the page prevented its menu.
+const NOTE_CONTEXTMENU: &str = "window.__pokitContextmenu = null; \
+    window.addEventListener('contextmenu', (e) => { if (e.isTrusted) window.__pokitContextmenu = e; }, { capture: true, once: true });";
+
+/// Closes the menu WebKit opens for a right-click whose `contextmenu` the page did not prevent,
+/// and says whether it did. Waits up to `PLUGIN_KEYS_SETTLE_MS` for the page's event, then as
+/// long again for the menu.
+async fn close_menu(page: &PluginPage, watch: Option<u64>) -> Result<bool, Failure> {
+    let Some(watch) = watch else {
+        return Ok(false);
+    };
+    let js = format!(
+        "new Promise((resolve) => {{ const until = performance.now() + {PLUGIN_KEYS_SETTLE_MS}; \
+         const poll = () => {{ const e = window.__pokitContextmenu; \
+         e ? resolve({{ prevented: e.defaultPrevented }}) : performance.now() >= until ? resolve({{}}) : setTimeout(poll, 2); }}; \
+         poll(); }})"
+    );
+    let seen = Page::Plugin(page).eval(&js, EVALUATE_TIMEOUT).await?;
+    if seen["prevented"] != false {
+        return Ok(false);
+    }
+    page.plugin
+        .close_menu(watch, Duration::from_millis(PLUGIN_KEYS_SETTLE_MS))
+        .await
 }

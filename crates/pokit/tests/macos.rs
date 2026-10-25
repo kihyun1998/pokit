@@ -93,38 +93,9 @@ fn type_and_key_reach_the_page_behind_another_app_and_leave_the_front_and_the_cu
     }
     let _front = FRONTMOST.lock().unwrap_or_else(|e| e.into_inner());
     let p = Pokit::launch_fixture("mac-type");
-    let watching = Arc::new(AtomicBool::new(true));
-    let fronts = {
-        let watching = watching.clone();
-        std::thread::spawn(move || {
-            let mut seen = Vec::new();
-            while watching.load(Ordering::SeqCst) {
-                if let Some(pid) = frontmost_pid() {
-                    if seen.last() != Some(&pid) {
-                        seen.push(pid);
-                    }
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            seen
-        })
-    };
-    // The cursor is read just before and after each input command.
-    let moved = std::cell::RefCell::new(Vec::new());
-    let input = |args: &[&str]| {
-        let (before, start) = (cursor_location(), std::time::Instant::now());
-        let r = p.run(args);
-        let after = cursor_location();
-        if after != before {
-            moved.borrow_mut().push((
-                format!("{args:?}: {before:?} -> {after:?}"),
-                start.elapsed(),
-            ));
-        }
-        r
-    };
+    let watch = FrontAndCursor::watch(&p);
 
-    let r = input(&["type", "kim", "--into", "#name"]);
+    let r = watch.input(&["type", "kim", "--into", "#name"]);
     assert_eq!(r.code, 0, "{}", r.out);
     assert_eq!(r.out["engine"], "plugin", "{}", r.out);
     assert_eq!(r.out["key_events"], 3, "{}", r.out);
@@ -133,40 +104,139 @@ fn type_and_key_reach_the_page_behind_another_app_and_leave_the_front_and_the_cu
     assert_eq!(r.out["delivery"], "confirmed", "{}", r.out);
     assert_eq!(p.run(&["read", "#name"]).out["value"], "kim");
 
-    let r = input(&["type", " Kim é한", "--into", "#other-input"]);
+    let r = watch.input(&["type", " Kim é한", "--into", "#other-input"]);
     assert_eq!(r.code, 0, "{}", r.out);
     assert_eq!(r.out["inserted_chars"], 2, "{}", r.out);
     assert_eq!(r.out["keydowns_sent"], 6, "{}", r.out);
     assert_eq!(p.run(&["read", "#other-input"]).out["value"], " Kim é한");
 
-    let r = input(&["key", "Ctrl+Shift+KeyT", "--into", "#name"]);
+    let r = watch.input(&["key", "Ctrl+Shift+KeyT", "--into", "#name"]);
     assert_eq!(r.code, 0, "{}", r.out);
     assert_eq!(r.out["code"], "KeyT", "{}", r.out);
     assert_eq!(r.out["keydowns_received"], 3, "{}", r.out);
     assert_eq!(p.run(&["read", "#last-key"]).out["text"], "Ctrl+Shift+KeyT");
 
-    let r = input(&["key", "Backspace"]);
+    let r = watch.input(&["key", "Backspace"]);
     assert_eq!(r.code, 0, "{}", r.out);
     assert_eq!(p.run(&["read", "#name"]).out["value"], "ki");
 
-    watching.store(false, Ordering::SeqCst);
-    let fronts = fronts.join().unwrap();
-    assert!(
-        !fronts.contains(&p.app_pid()),
-        "input brought the app (pid {}) to the front; frontmost pids in order: {fronts:?}",
-        p.app_pid()
-    );
-    let moved = moved.into_inner();
-    if let Some((_, took)) = moved.iter().max_by_key(|(_, took)| *took) {
-        // A cursor that also moves with no input sent is a hand on the mouse.
-        let before = cursor_location();
-        std::thread::sleep(*took);
-        if cursor_location() != before {
-            cannot_judge(&format!("the mouse is in use: {moved:?}"));
-            return;
-        }
-        panic!("the cursor moved during input: {moved:?}");
+    watch.check();
+}
+
+#[test]
+fn clicks_reach_the_page_behind_another_app_and_leave_the_front_and_the_cursor_alone() {
+    if !quiet_machine("clicks_reach_the_page_behind_another_app") {
+        return;
     }
+    let _front = FRONTMOST.lock().unwrap_or_else(|e| e.into_inner());
+    let p = Pokit::launch_fixture("mac-click");
+    let r = p.run(&[
+        "eval",
+        "window.__clicks = []; document.querySelector('#target').addEventListener('click', e => __clicks.push(e.isTrusted))",
+    ]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    let watch = FrontAndCursor::watch(&p);
+
+    let r = watch.input(&["click", "#target"]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert_eq!(r.out["engine"], "plugin", "{}", r.out);
+    assert_eq!(r.out["action"], "click", "{}", r.out);
+    assert_eq!(p.run(&["read", "#last-mouse"]).out["text"], "click");
+    assert_eq!(p.run(&["eval", "__clicks"]).out["value"], json!([true]));
+
+    for (flag, event, action) in [
+        ("--double", "dblclick", "double_click"),
+        ("--right", "contextmenu", "right_click"),
+        ("--hover", "mouseover", "hover"),
+    ] {
+        watch.input(&["click", "#submit", "--hover"]);
+        let r = watch.input(&["click", "#target", flag]);
+        assert_eq!(r.code, 0, "{flag}: {}", r.out);
+        assert_eq!(r.out["action"], action, "{flag}: {}", r.out);
+        assert_eq!(p.run(&["read", "#last-mouse"]).out["text"], event, "{flag}");
+    }
+
+    // A click by point lands on the element at that point.
+    let r = p.run(&[
+        "eval",
+        "(() => { const e = document.querySelector('#submit'); e.scrollIntoView({ block: 'center' }); const r = e.getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()",
+    ]);
+    let (x, y) = (r.out["value"][0].to_string(), r.out["value"][1].to_string());
+    let r = watch.input(&["click", "--x", &x, "--y", &y]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert_eq!(p.run(&["read", "#result"]).out["text"], "Hello,");
+
+    watch.check();
+}
+
+#[test]
+fn a_click_returns_once_a_busy_page_has_handled_it() {
+    let p = Pokit::launch_fixture("mac-click-busy");
+    let r = p.run(&[
+        "eval",
+        "document.addEventListener('mousedown', () => { const end = performance.now() + 300; while (performance.now() < end) {} }, true)",
+    ]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    for (flag, event) in [
+        ("--hover", "mouseover"),
+        ("--double", "dblclick"),
+        ("--right", "contextmenu"),
+    ] {
+        p.run(&[
+            "eval",
+            "document.querySelector('#last-mouse').textContent = ''",
+        ]);
+        let r = p.run(&["click", "#target", flag]);
+        assert_eq!(r.code, 0, "{flag}: {}", r.out);
+        assert_eq!(p.run(&["read", "#last-mouse"]).out["text"], event, "{flag}");
+        p.run(&["click", "#submit", "--hover"]);
+    }
+    p.run(&[
+        "eval",
+        "document.querySelector('#last-mouse').textContent = ''",
+    ]);
+    assert_eq!(p.run(&["click", "#target"]).code, 0);
+    assert_eq!(p.run(&["read", "#last-mouse"]).out["text"], "click");
+}
+
+#[test]
+fn a_right_click_closes_the_menu_webkit_opens_and_leaves_the_page_taking_clicks() {
+    let p = Pokit::launch_fixture("mac-right-click");
+    for _ in 0..2 {
+        let r = p.run(&["click", "#name", "--right"]);
+        assert_eq!(r.code, 0, "{}", r.out);
+        assert_eq!(r.out["action"], "right_click", "{}", r.out);
+        assert_eq!(r.out["menu_closed"], true, "{}", r.out);
+        let r = p.run(&["click", "#target"]);
+        assert_eq!(r.code, 0, "{}", r.out);
+        assert_eq!(p.run(&["read", "#last-mouse"]).out["text"], "click");
+        p.run(&[
+            "eval",
+            "document.querySelector('#last-mouse').textContent = ''",
+        ]);
+    }
+    let r = p.run(&["click", "#target", "--right"]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert_eq!(
+        r.out["menu_closed"], false,
+        "the page prevented its menu: {}",
+        r.out
+    );
+    let r = p.run(&["click", "#name", "--right", "--hover"]);
+    assert_eq!(r.out["action"], "hover", "{}", r.out);
+    assert!(
+        r.out.get("menu_closed").is_none(),
+        "a hover presses nothing: {}",
+        r.out
+    );
+    // The fixture prevents the page's menu here and opens the app's own; that one stays.
+    let r = p.run(&["click", "#context-target", "--right"]);
+    assert_eq!(r.code, 0, "{}", r.out);
+    assert_eq!(
+        r.out["menu_closed"], false,
+        "the app's own menu is not pokit's to close: {}",
+        r.out
+    );
 }
 
 #[test]
@@ -224,10 +294,26 @@ fn input_refuses_what_macos_cannot_take_and_masks_a_secret() {
         &["type", "x", "--route", "cdp"][..],
         &["key", "KeyA", "--route", "os"][..],
         &["type", "x", "--into", "e3"][..],
+        &["click", "#target", "--route", "cdp"][..],
+        &["click", "e3"][..],
     ] {
         let r = p.run(args);
         assert_eq!(r.code, UNSUPPORTED, "{args:?}: {}", r.out);
     }
+    let r = p.run(&["click", "#target", "--route", "os"]);
+    assert_eq!(r.code, UNSUPPORTED, "{}", r.out);
+    assert!(
+        r.out["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("cursor")),
+        "{}",
+        r.out
+    );
+    let r = p.run(&["click", "#nothing-here"]);
+    assert_eq!(r.out["error"]["kind"], "not_found", "{}", r.out);
+    p.run(&["click", "#name"]);
+    let r = p.run(&["click", "#target", "--require-focus", "#pane-other"]);
+    assert_eq!(r.out["error"]["kind"], "guard_refused", "{}", r.out);
 
     let r = p.run(&[
         "type",
@@ -243,7 +329,7 @@ fn input_refuses_what_macos_cannot_take_and_masks_a_secret() {
     assert_eq!(r.out["error"]["kind"], "not_found", "{}", r.out);
 
     let caps = p.run(&["capabilities"]).out;
-    for command in ["key", "type"] {
+    for command in ["click", "key", "type"] {
         let c = &caps["commands"][command];
         assert_eq!(c["supported"], true, "{command}: {c}");
         assert_eq!(c["routes"]["plugin"]["default"], true, "{command}: {c}");
@@ -550,7 +636,7 @@ fn commands_not_built_on_macos_exit_unsupported() {
             "{supported}: {caps}"
         );
     }
-    for unsupported in ["attach", "snapshot", "click", "trace", "profile", "doctor"] {
+    for unsupported in ["attach", "snapshot", "trace", "profile", "doctor"] {
         assert_eq!(
             caps["commands"][unsupported]["supported"], false,
             "{unsupported}: {caps}"
@@ -602,7 +688,7 @@ fn commands_not_built_on_macos_exit_unsupported() {
     let p = Pokit::launch_fixture("mac-unsupported-session");
     for args in [
         &["snapshot"][..],
-        &["click", "#target"][..],
+        &["hold", "KeyA", "--count", "1"][..],
         &["trace", "start"][..],
         &["profile", "start"][..],
     ] {
@@ -622,6 +708,77 @@ fn commands_not_built_on_macos_exit_unsupported() {
 }
 
 /// The frontmost app's process id; none when nothing is, or the login window is (a locked screen).
+/// The frontmost app sampled throughout a test, and the cursor read around each input command.
+struct FrontAndCursor<'a> {
+    p: &'a Pokit,
+    watching: Arc<AtomicBool>,
+    fronts: std::thread::JoinHandle<Vec<u32>>,
+    moved: std::cell::RefCell<Vec<(String, Duration)>>,
+}
+
+impl<'a> FrontAndCursor<'a> {
+    fn watch(p: &'a Pokit) -> Self {
+        let watching = Arc::new(AtomicBool::new(true));
+        let fronts = {
+            let watching = watching.clone();
+            std::thread::spawn(move || {
+                let mut seen = Vec::new();
+                while watching.load(Ordering::SeqCst) {
+                    if let Some(pid) = frontmost_pid() {
+                        if seen.last() != Some(&pid) {
+                            seen.push(pid);
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                seen
+            })
+        };
+        FrontAndCursor {
+            p,
+            watching,
+            fronts,
+            moved: Default::default(),
+        }
+    }
+
+    /// Runs an input command, noting the cursor just before and after it.
+    fn input(&self, args: &[&str]) -> Run {
+        let (before, start) = (cursor_location(), std::time::Instant::now());
+        let r = self.p.run(args);
+        let after = cursor_location();
+        if after != before {
+            self.moved.borrow_mut().push((
+                format!("{args:?}: {before:?} -> {after:?}"),
+                start.elapsed(),
+            ));
+        }
+        r
+    }
+
+    /// Fails if the app came to the front, or the cursor moved with no hand on the mouse.
+    fn check(self) {
+        self.watching.store(false, Ordering::SeqCst);
+        let fronts = self.fronts.join().unwrap();
+        assert!(
+            !fronts.contains(&self.p.app_pid()),
+            "input brought the app (pid {}) to the front; frontmost pids in order: {fronts:?}",
+            self.p.app_pid()
+        );
+        let moved = self.moved.into_inner();
+        if let Some((_, took)) = moved.iter().max_by_key(|(_, took)| *took) {
+            // A cursor that also moves with no input sent is a hand on the mouse.
+            let before = cursor_location();
+            std::thread::sleep(*took);
+            if cursor_location() != before {
+                cannot_judge(&format!("the mouse is in use: {moved:?}"));
+                return;
+            }
+            panic!("the cursor moved during input: {moved:?}");
+        }
+    }
+}
+
 fn frontmost_pid() -> Option<u32> {
     let asn = run_text("lsappinfo", &["front"]);
     let info = run_text("lsappinfo", &["info", "-only", "pid", asn.trim()]);

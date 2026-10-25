@@ -15,6 +15,8 @@ mod channel;
 mod eval;
 #[cfg(target_os = "macos")]
 mod input;
+#[cfg(target_os = "macos")]
+mod menu;
 
 use tauri::plugin::{Builder, TauriPlugin};
 use tauri::Runtime;
