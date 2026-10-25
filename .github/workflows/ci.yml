@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        # windows-2022, not windows-latest: docs/map/testing-against-the-fixture.md
+        os: [macos-latest, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Runner
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then
+            sw_vers
+            lsappinfo info -only name "$(lsappinfo front)" || true
+            defaults read com.apple.HIToolbox AppleEnabledInputSources || true
+          else
+            cmd //c ver
+            reg query 'HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}' //v pv || echo "no WebView2 runtime (machine-wide)"
+          fi
+          uname -m
+          rustc --version
+      - run: cargo fmt --all -- --check
+        if: ${{ !cancelled() }}
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+        if: ${{ !cancelled() }}
+      - run: cargo test --workspace --no-fail-fast
+        if: ${{ !cancelled() }}
+

@@ -88,6 +88,9 @@ fn eval_runs_in_the_page_and_close_ends_the_app() {
 
 #[test]
 fn type_and_key_reach_the_page_behind_another_app_and_leave_the_front_and_the_cursor_alone() {
+    if !quiet_machine("type_and_key_reach_the_page_behind_another_app") {
+        return;
+    }
     let _front = FRONTMOST.lock().unwrap_or_else(|e| e.into_inner());
     let p = Pokit::launch_fixture("mac-type");
     let watching = Arc::new(AtomicBool::new(true));
@@ -159,7 +162,7 @@ fn type_and_key_reach_the_page_behind_another_app_and_leave_the_front_and_the_cu
         let before = cursor_location();
         std::thread::sleep(*took);
         if cursor_location() != before {
-            eprintln!("the mouse is in use; the cursor was not checked: {moved:?}");
+            cannot_judge(&format!("the mouse is in use: {moved:?}"));
             return;
         }
         panic!("the cursor moved during input: {moved:?}");
@@ -183,10 +186,16 @@ fn inserted_text_keeps_its_place_behind_keys_a_busy_page_has_not_handled_yet() {
 
 #[test]
 fn typed_text_arrives_as_given_under_a_korean_input_source() {
-    let p = Pokit::launch_fixture("mac-input-source");
-    let Some(_korean) = InputSource::select("com.apple.inputmethod.Korean.2SetKorean") else {
-        eprintln!("2-Set Korean is not an enabled input source; nothing to check");
+    if !quiet_machine("typed_text_arrives_as_given_under_a_korean_input_source") {
         return;
+    }
+    let p = Pokit::launch_fixture("mac-input-source");
+    let _korean = match InputSource::select("com.apple.inputmethod.Korean.2SetKorean") {
+        Ok(selected) => selected,
+        Err(why) => {
+            cannot_judge(&format!("2-Set Korean: {why}"));
+            return;
+        }
     };
     let r = p.run(&["type", "abc", "--into", "#name"]);
     assert_eq!(r.code, 0, "{}", r.out);
@@ -414,9 +423,12 @@ fn launching_a_build_without_the_plugin_fails_and_leaves_nothing() {
 
 #[test]
 fn launch_leaves_the_frontmost_app_frontmost() {
+    if !quiet_machine("launch_leaves_the_frontmost_app_frontmost") {
+        return;
+    }
     let _front = FRONTMOST.lock().unwrap_or_else(|e| e.into_inner());
     let Some(before) = frontmost_pid() else {
-        eprintln!("no app is frontmost (screen locked?); nothing to check");
+        cannot_judge("no app is frontmost (screen locked?)");
         return;
     };
     let watching = Arc::new(AtomicBool::new(true));
@@ -693,9 +705,11 @@ fn cursor_location() -> (f64, f64) {
     }
 }
 
-/// An input source selected for a test; the one selected before is selected again on drop.
+/// An input source selected for a test; on drop the one selected before is selected again, and
+/// the source is disabled again when the test enabled it.
 struct InputSource {
     before: *const std::ffi::c_void,
+    enabled: Option<*const std::ffi::c_void>,
 }
 
 #[link(name = "Carbon", kind = "framework")]
@@ -710,6 +724,8 @@ extern "C" {
         key: *const std::ffi::c_void,
     ) -> *const std::ffi::c_void;
     fn TISSelectInputSource(source: *const std::ffi::c_void) -> i32;
+    fn TISEnableInputSource(source: *const std::ffi::c_void) -> i32;
+    fn TISDisableInputSource(source: *const std::ffi::c_void) -> i32;
     static kTISPropertyInputSourceID: *const std::ffi::c_void;
 }
 
@@ -723,41 +739,78 @@ extern "C" {
         size: isize,
         encoding: u32,
     ) -> bool;
+    fn CFRetain(object: *const std::ffi::c_void) -> *const std::ffi::c_void;
     fn CFRelease(object: *const std::ffi::c_void);
 }
 
 impl InputSource {
-    /// Selects the enabled input source `id`; `None` when it is not enabled or did not take.
-    fn select(id: &str) -> Option<InputSource> {
-        // SAFETY: Carbon's input source calls on objects it returns; each one copied or created
-        // here is released, the current source on drop.
+    /// Selects input source `id`, enabling it first on CI when it is not enabled; why not, when
+    /// it is not enabled here or did not take.
+    fn select(id: &str) -> Result<InputSource, String> {
+        // SAFETY: Carbon's input source calls on objects it returns; each one copied, created or
+        // retained here is released, `before` and `enabled` on drop.
         unsafe {
-            let list = TISCreateInputSourceList(std::ptr::null(), false);
-            let found = (0..CFArrayGetCount(list))
-                .map(|i| CFArrayGetValueAtIndex(list, i))
-                .find(|s| source_id(*s).as_deref() == Some(id));
-            let selected = found.map(|source| {
-                let before = TISCopyCurrentKeyboardInputSource();
-                (TISSelectInputSource(source) == 0).then_some(InputSource { before })
-            });
-            CFRelease(list);
-            let selected = selected.flatten()?;
+            let find = |include_all: bool| find_id(id, include_all);
+            let (source, enabled) = match find(false) {
+                Some(s) => (s, None),
+                None if on_ci() => {
+                    if let Some((method, _)) = id.rsplit_once('.') {
+                        let m = find_id(method, true).ok_or("its input method is not installed")?;
+                        TISEnableInputSource(m);
+                        CFRelease(m);
+                    }
+                    let s = find(true).ok_or("not among the installed input sources")?;
+                    let status = TISEnableInputSource(s);
+                    if status != 0 {
+                        CFRelease(s);
+                        return Err(format!("TISEnableInputSource returned {status}"));
+                    }
+                    (s, Some(CFRetain(s)))
+                }
+                None => return Err("not an enabled input source".into()),
+            };
+            let selected = InputSource {
+                before: TISCopyCurrentKeyboardInputSource(),
+                enabled,
+            };
+            let status = TISSelectInputSource(source);
+            CFRelease(source);
             let now = TISCopyCurrentKeyboardInputSource();
-            let took = source_id(now).as_deref() == Some(id);
+            let current = source_id(now);
             CFRelease(now);
-            took.then_some(selected)
+            if status != 0 || current.as_deref() != Some(id) {
+                return Err(format!(
+                    "TISSelectInputSource returned {status}; the current source is {current:?}"
+                ));
+            }
+            Ok(selected)
         }
     }
 }
 
 impl Drop for InputSource {
     fn drop(&mut self) {
-        // SAFETY: `before` is the source copied in `select`, released once here.
+        // SAFETY: `before` and `enabled` were copied or retained in `select`, released once here.
         unsafe {
             TISSelectInputSource(self.before);
             CFRelease(self.before);
+            if let Some(source) = self.enabled {
+                TISDisableInputSource(source);
+                CFRelease(source);
+            }
         }
     }
+}
+
+/// The input source `id`, retained, among the enabled ones or among every installed one.
+unsafe fn find_id(id: &str, include_all: bool) -> Option<*const std::ffi::c_void> {
+    let list = TISCreateInputSourceList(std::ptr::null(), include_all);
+    let found = (0..CFArrayGetCount(list))
+        .map(|i| CFArrayGetValueAtIndex(list, i))
+        .find(|s| source_id(*s).as_deref() == Some(id))
+        .map(|s| CFRetain(s));
+    CFRelease(list);
+    found
 }
 
 /// An input source's identifier.

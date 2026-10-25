@@ -3,7 +3,7 @@
 
 use super::commands::{
     delivery_js, delivery_verdict, focus_holds_js, focus_verdict, invalid_selector, no_match,
-    refs_unsupported, target_verdict, EVALUATE_TIMEOUT, KEYS_SETTLE_MS, NOTE_KEYDOWNS,
+    refs_unsupported, target_verdict, EVALUATE_TIMEOUT, NOTE_KEYDOWNS, PLUGIN_KEYS_SETTLE_MS,
 };
 use super::page::{Page, PluginPage};
 use super::State;
@@ -174,13 +174,13 @@ async fn send_press(
     Ok(())
 }
 
-/// Waits, up to `KEYS_SETTLE_MS`, until the page has noted `n` keydowns.
+/// Waits, up to `PLUGIN_KEYS_SETTLE_MS`, until the page has noted `n` keydowns.
 async fn keys_handled(page: &PluginPage, n: usize) {
     if n == 0 {
         return;
     }
     let js = format!(
-        "new Promise((resolve) => {{ const until = performance.now() + {KEYS_SETTLE_MS}; \
+        "new Promise((resolve) => {{ const until = performance.now() + {PLUGIN_KEYS_SETTLE_MS}; \
          const poll = () => {{ const c = window.__pokitKeydowns; \
          (!c || c.codes.length >= {n} || performance.now() >= until) ? resolve(true) : setTimeout(poll, 2); }}; \
          poll(); }})"
@@ -189,10 +189,10 @@ async fn keys_handled(page: &PluginPage, n: usize) {
 }
 
 /// The delivery check over the plugin: the plugin's events reach the page after the request
-/// that sent them returned, so it waits up to `KEYS_SETTLE_MS` for them.
+/// that sent them returned, so it waits up to `PLUGIN_KEYS_SETTLE_MS` for them.
 async fn delivery(page: &PluginPage, downs: &[String], sent_all: bool) -> Result<Fields, Failure> {
     let read = Page::Plugin(page)
-        .eval(&delivery_js(downs, KEYS_SETTLE_MS), EVALUATE_TIMEOUT)
+        .eval(&delivery_js(downs, PLUGIN_KEYS_SETTLE_MS), EVALUATE_TIMEOUT)
         .await;
     delivery_verdict(read, downs, sent_all)
 }
