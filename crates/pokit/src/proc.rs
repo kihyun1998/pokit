@@ -404,11 +404,6 @@ pub fn listening_pid(port: u16) -> Option<u32> {
         .map(|row| row[5])
 }
 
-#[cfg(not(windows))]
-pub fn listening_pid(_port: u16) -> Option<u32> {
-    None
-}
-
 /// The version of the Evergreen WebView2 runtime installed for the machine or for this user,
 /// the newer of the two.
 #[cfg(windows)]

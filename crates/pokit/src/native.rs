@@ -284,12 +284,12 @@ mod win {
     }
 
     /// The context menus WebView2's browser process `pid` shows for a page: its visible
-    /// `Chrome_WidgetWin_1` windows that are both topmost and tool windows. A tooltip is topmost
+    /// `Chrome_WidgetWin_*` windows that are both topmost and tool windows. A tooltip is topmost
     /// but not a tool window.
     pub fn browser_menus(pid: u32) -> Vec<isize> {
         windows_of(pid)
             .into_iter()
-            .filter(|&h| class_name(h) == "Chrome_WidgetWin_1")
+            .filter(|&h| class_name(h).starts_with("Chrome_WidgetWin_"))
             .filter(|&h| {
                 // SAFETY: a plain query on a window handle.
                 let style = unsafe { GetWindowLongW(h, GWL_EXSTYLE) } as u32;

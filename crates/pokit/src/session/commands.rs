@@ -732,6 +732,7 @@ impl State {
                 _ => "click",
             }
         };
+        #[cfg_attr(not(windows), allow(unused_mut))]
         let mut f = fields! { "action" => action, "x" => x, "y" => y };
         #[cfg(windows)]
         if action == "right_click" {
