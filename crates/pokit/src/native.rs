@@ -128,8 +128,8 @@ pub enum Refusal {
 
 #[cfg(windows)]
 pub use win::{
-    answer, choose, click_tray, context_menu, context_menu_open, dialogs, dismiss, menus, pick,
-    tray_icons,
+    answer, browser_menus, choose, click_tray, close_browser_menu, context_menu, context_menu_open,
+    dialogs, dismiss, menus, pick, tray_icons,
 };
 
 #[cfg(windows)]
@@ -149,10 +149,11 @@ mod win {
     use windows::Win32::UI::Input::KeyboardAndMouse::{VK_ESCAPE, VK_RETURN, VK_RIGHT};
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumChildWindows, EnumWindows, GetClassNameW, GetDlgCtrlID, GetMenu, GetMenuItemCount,
-        GetMenuItemInfoW, GetWindowTextW, GetWindowThreadProcessId, IsWindow, IsWindowVisible,
-        PostMessageW, SendMessageTimeoutW, HMENU, MENUITEMINFOW, MFS_CHECKED, MFS_DISABLED,
-        MFT_SEPARATOR, MIIM_FTYPE, MIIM_ID, MIIM_STATE, MIIM_STRING, MIIM_SUBMENU,
-        SMTO_ABORTIFHUNG, WM_COMMAND, WM_KEYDOWN, WM_NULL, WM_SETTEXT,
+        GetMenuItemInfoW, GetWindowLongW, GetWindowTextW, GetWindowThreadProcessId, IsWindow,
+        IsWindowVisible, PostMessageW, SendMessageTimeoutW, GWL_EXSTYLE, HMENU, MENUITEMINFOW,
+        MFS_CHECKED, MFS_DISABLED, MFT_SEPARATOR, MIIM_FTYPE, MIIM_ID, MIIM_STATE, MIIM_STRING,
+        MIIM_SUBMENU, SMTO_ABORTIFHUNG, WM_COMMAND, WM_KEYDOWN, WM_KEYUP, WM_NULL, WM_SETTEXT,
+        WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
     };
 
     /// The visible top-level windows of process `pid`.
@@ -280,6 +281,48 @@ mod win {
     fn post_key(hwnd: HWND, key: u16) -> bool {
         // SAFETY: posts to a menu window of the app; nothing is borrowed.
         unsafe { PostMessageW(Some(hwnd), WM_KEYDOWN, WPARAM(usize::from(key)), LPARAM(0)) }.is_ok()
+    }
+
+    /// The context menus WebView2's browser process `pid` shows for a page: its visible
+    /// `Chrome_WidgetWin_*` windows that are both topmost and tool windows. A tooltip is topmost
+    /// but not a tool window.
+    pub fn browser_menus(pid: u32) -> Vec<isize> {
+        windows_of(pid)
+            .into_iter()
+            .filter(|&h| class_name(h).starts_with("Chrome_WidgetWin_"))
+            .filter(|&h| {
+                // SAFETY: a plain query on a window handle.
+                let style = unsafe { GetWindowLongW(h, GWL_EXSTYLE) } as u32;
+                style & (WS_EX_TOPMOST.0 | WS_EX_TOOLWINDOW.0)
+                    == WS_EX_TOPMOST.0 | WS_EX_TOOLWINDOW.0
+            })
+            .map(|h| h.0 as isize)
+            .collect()
+    }
+
+    /// Closes a menu `browser_menus` found with an Escape posted to it; whether it was gone
+    /// within a second.
+    pub fn close_browser_menu(hwnd: isize) -> bool {
+        let hwnd = HWND(hwnd as *mut core::ffi::c_void);
+        let escape = WPARAM(usize::from(VK_ESCAPE.0));
+        // SAFETY: posts to a window of the instance's browser process; nothing is borrowed.
+        let posted = unsafe {
+            PostMessageW(Some(hwnd), WM_KEYDOWN, escape, LPARAM(0x0001_0001)).is_ok()
+                && PostMessageW(
+                    Some(hwnd),
+                    WM_KEYUP,
+                    escape,
+                    LPARAM(0xC001_0001u32 as isize),
+                )
+                .is_ok()
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        // SAFETY: plain queries on a window handle, which may have been destroyed.
+        let open = || unsafe { IsWindow(Some(hwnd)).as_bool() && IsWindowVisible(hwnd).as_bool() };
+        while posted && open() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        posted && !open()
     }
 
     /// Every submenu handle in `menu`, at any depth.

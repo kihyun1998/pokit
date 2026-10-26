@@ -55,6 +55,54 @@ fn an_elevated_launch_opens_the_port_starting_the_app_at_medium_integrity_where_
     assert_eq!(r.out["value"], 2, "{}", r.out);
 }
 
+/// The visible topmost tool windows of the process listening on debugging port `port`:
+/// WebView2's context menus, drawn by its browser process.
+fn browser_menus(port: u64) -> Vec<isize> {
+    let out = std::process::Command::new("netstat")
+        .args(["-ano", "-p", "TCP"])
+        .output()
+        .unwrap();
+    let listening = format!("127.0.0.1:{port} ");
+    let pid = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find(|l| l.contains(&listening) && l.contains("LISTENING"))
+        .and_then(|l| l.split_whitespace().last()?.parse::<u32>().ok())
+        .expect("no process listens on the debugging port");
+    window::windows_of(pid)
+        .into_iter()
+        .filter(|&h| window::ex_style(h) & 0x88 == 0x88)
+        .collect()
+}
+
+#[test]
+fn a_right_click_closes_the_menu_webview2_opens_and_leaves_the_page_taking_clicks() {
+    let p = Pokit::launch_fixture("browser-menu");
+    let port = p.launched.as_ref().unwrap()["cdp_port"].as_u64().unwrap();
+    for round in 1..=3 {
+        let r = p.run(&["click", "h1", "--right"]);
+        assert_eq!(r.code, 0, "{}", r.out);
+        assert_eq!(r.out["menu_closed"], true, "round {round}: {}", r.out);
+        assert!(
+            browser_menus(port).is_empty(),
+            "round {round}: WebView2's menu is still open"
+        );
+        let r = p.run(&["click", "#target"]);
+        assert_eq!(r.code, 0, "{}", r.out);
+        assert_eq!(
+            p.run(&["read", "#last-mouse"]).out["text"],
+            "click",
+            "round {round}"
+        );
+    }
+    let r = p.run(&["click", "#target", "--right"]);
+    assert_eq!(
+        r.out["menu_closed"], false,
+        "the page prevented the menu: {}",
+        r.out
+    );
+    assert_eq!(p.run(&["read", "#last-mouse"]).out["text"], "contextmenu");
+}
+
 /// The ref written beside `line_start` in a snapshot, e.g. `textbox "Name"` → `e1`.
 fn ref_of(snapshot: &str, line_start: &str) -> String {
     let line = snapshot
