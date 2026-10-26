@@ -10,7 +10,7 @@ A Rust CLI an AI agent drives to test a running webview desktop app (Tauri and t
 |---|---|---|---|
 | Chrome DevTools Protocol — Input, Runtime, Tracing, IO, Profiler, Page | how it works | chromedevtools.github.io/devtools-protocol — **summarized** | binding |
 | WebView2 — remote debugging port via `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`, `AcceleratorKeyPressed` | how it works | Microsoft Learn — **summarized** | binding |
-| Tauri v2 — plugin authoring, webview eval, `cfg(debug_assertions)`-only build | how it works | v2.tauri.app — **summarized** | binding |
+| Tauri v2 — plugin authoring, webview eval, a build gated on a feature of its own | how it works | v2.tauri.app — **summarized** | binding |
 | Win32 — `SendInput` (incl. UIPI), foreground-window check, per-window DPI | how it works | Microsoft Learn — **summarized** | binding |
 | macOS — `CGEventPost`/`CGEventPostToPid`, `AXIsProcessTrusted`, ScreenCaptureKit | how it works | Apple developer docs — **summarized** | binding |
 | Chromium Trace Event Format — summarising a trace into style/layout/paint | how it works | its published spec — **summarized** | binding |

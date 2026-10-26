@@ -674,6 +674,61 @@ impl Drop for Shared {
     }
 }
 
+/// The mandatory integrity level of process `pid`, or of this test when `None`: 0x2000 is
+/// medium, 0x3000 high.
+#[cfg(windows)]
+pub fn integrity_level(pid: Option<u32>) -> Option<u32> {
+    use core::ffi::c_void;
+    type Handle = *mut c_void;
+    extern "system" {
+        fn GetCurrentProcess() -> Handle;
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> Handle;
+        fn CloseHandle(h: Handle) -> i32;
+    }
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn OpenProcessToken(process: Handle, access: u32, token: *mut Handle) -> i32;
+        fn GetTokenInformation(
+            t: Handle,
+            class: i32,
+            info: *mut c_void,
+            len: u32,
+            ret: *mut u32,
+        ) -> i32;
+        fn GetSidSubAuthorityCount(sid: *const c_void) -> *const u8;
+        fn GetSidSubAuthority(sid: *const c_void, index: u32) -> *const u32;
+    }
+    // SAFETY: handles are checked before use and closed after; the SID read from `buf` is the one
+    // GetTokenInformation (TokenIntegrityLevel) wrote there, and `buf` outlives the reads.
+    unsafe {
+        let process = match pid {
+            Some(pid) => OpenProcess(0x1000, 0, pid),
+            None => GetCurrentProcess(),
+        };
+        if process.is_null() {
+            return None;
+        }
+        let mut token = std::ptr::null_mut();
+        let opened = OpenProcessToken(process, 0x8, &mut token);
+        if pid.is_some() {
+            CloseHandle(process);
+        }
+        if opened == 0 {
+            return None;
+        }
+        let mut buf = [0u64; 16];
+        let mut len = 0;
+        let ok = GetTokenInformation(token, 25, buf.as_mut_ptr() as *mut c_void, 128, &mut len);
+        CloseHandle(token);
+        if ok == 0 {
+            return None;
+        }
+        let sid = *(buf.as_ptr() as *const *const c_void);
+        let count = *GetSidSubAuthorityCount(sid);
+        Some(*GetSidSubAuthority(sid, count.checked_sub(1)? as u32))
+    }
+}
+
 /// Whether a process with this id is running.
 #[cfg(windows)]
 pub fn process_alive(pid: u32) -> bool {
