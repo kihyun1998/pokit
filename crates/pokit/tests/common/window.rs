@@ -33,6 +33,7 @@ extern "system" {
     fn GetWindowThreadProcessId(hwnd: Hwnd, pid: *mut u32) -> u32;
     fn EnumWindows(callback: extern "system" fn(Hwnd, isize) -> i32, lparam: isize) -> i32;
     fn IsWindowVisible(hwnd: Hwnd) -> i32;
+    fn GetWindowLongW(hwnd: Hwnd, index: i32) -> i32;
     fn IsIconic(hwnd: Hwnd) -> i32;
     fn GetWindowTextW(hwnd: Hwnd, text: *mut u16, max: i32) -> i32;
     fn WindowFromPoint(x: i32, y: i32) -> Hwnd;
@@ -107,6 +108,12 @@ pub fn windows_of(pid: u32) -> Vec<isize> {
     // SAFETY: the callback only reads `found` through `lparam` while `EnumWindows` runs.
     unsafe { EnumWindows(each, &mut found as *mut Found as isize) };
     found.windows
+}
+
+/// The extended window style of `hwnd`.
+pub fn ex_style(hwnd: isize) -> u32 {
+    // SAFETY: a plain query; an invalid handle answers 0.
+    unsafe { GetWindowLongW(hwnd as Hwnd, -20) as u32 }
 }
 
 pub fn rect(hwnd: isize) -> Rect {

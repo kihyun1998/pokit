@@ -155,6 +155,20 @@ mod win {
     extern "system" {
         pub fn GetCurrentProcess() -> Handle;
     }
+    #[link(name = "iphlpapi")]
+    extern "system" {
+        pub fn GetExtendedTcpTable(
+            table: *mut c_void,
+            size: *mut u32,
+            order: i32,
+            family: u32,
+            class: i32,
+            reserved: u32,
+        ) -> u32;
+    }
+    pub const AF_INET: u32 = 2;
+    /// `TCP_TABLE_OWNER_PID_LISTENER`.
+    pub const TCP_TABLE_OWNER_PID_LISTENER: i32 = 3;
 
     pub const TOKEN_ASSIGN_PRIMARY: u32 = 0x0001;
     pub const TOKEN_DUPLICATE: u32 = 0x0002;
@@ -346,6 +360,53 @@ pub fn integrity_level(_pid: Option<u32>) -> Option<u32> {
 /// Whether this process runs at high integrity or above.
 pub fn elevated() -> bool {
     integrity_level(None).is_some_and(|il| il >= 0x3000)
+}
+
+/// The process listening on loopback TCP port `port`, as WebView2's browser process listens on
+/// the debugging port.
+#[cfg(windows)]
+pub fn listening_pid(port: u16) -> Option<u32> {
+    let mut size = 0u32;
+    // SAFETY: a null table with a zero size asks only for the size needed.
+    unsafe {
+        win::GetExtendedTcpTable(
+            std::ptr::null_mut(),
+            &mut size,
+            0,
+            win::AF_INET,
+            win::TCP_TABLE_OWNER_PID_LISTENER,
+            0,
+        )
+    };
+    let mut buf = vec![0u32; size as usize / 4 + 1];
+    let mut size = (buf.len() * 4) as u32;
+    // SAFETY: `buf` is a writable, 4-byte aligned buffer of `size` bytes.
+    let status = unsafe {
+        win::GetExtendedTcpTable(
+            buf.as_mut_ptr() as *mut core::ffi::c_void,
+            &mut size,
+            0,
+            win::AF_INET,
+            win::TCP_TABLE_OWNER_PID_LISTENER,
+            0,
+        )
+    };
+    if status != 0 {
+        return None;
+    }
+    // MIB_TCPTABLE_OWNER_PID: a count, then rows of state, local address, local port (network
+    // order in the low 16 bits), remote address, remote port and owning pid.
+    let rows = buf.get(1..1 + 6 * *buf.first()? as usize)?;
+    rows.as_chunks::<6>()
+        .0
+        .iter()
+        .find(|row| u16::from_be(row[2] as u16) == port)
+        .map(|row| row[5])
+}
+
+#[cfg(not(windows))]
+pub fn listening_pid(_port: u16) -> Option<u32> {
+    None
 }
 
 /// The version of the Evergreen WebView2 runtime installed for the machine or for this user,
@@ -635,6 +696,16 @@ mod tests {
         assert!(!launch_needs_medium(true, Some("131.0.2903.86")));
         assert!(!launch_needs_medium(false, Some("156.0.4314.42")));
         assert!(!launch_needs_medium(false, None));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_process_listening_on_a_port_is_found_by_it() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert_eq!(listening_pid(port), Some(std::process::id()));
+        drop(listener);
+        assert_eq!(listening_pid(port), None);
     }
 
     #[cfg(windows)]

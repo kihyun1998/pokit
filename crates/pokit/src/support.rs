@@ -50,7 +50,15 @@ pub fn routes(command: &str) -> Option<serde_json::Value> {
     let cdp = json!({ "default": true, "takes_focus": false });
     let os = json!({ "takes_focus": true, "needs": "the app in front: `window activate`" });
     match command {
-        "click" | "key" if cfg!(windows) => Some(json!({ "cdp": cdp, "os": os })),
+        "click" if cfg!(windows) => Some(json!({
+            "cdp": {
+                "default": true,
+                "takes_focus": false,
+                "right_click_menu": "the menu WebView2 opens, when the page does not prevent it, is closed at once (`menu_closed`); a menu the app opens stays",
+            },
+            "os": os,
+        })),
+        "key" if cfg!(windows) => Some(json!({ "cdp": cdp, "os": os })),
         "type" if cfg!(windows) => Some(json!({
             "cdp": { "default": true, "takes_focus": false, "ime_composition": true },
             "os": { "takes_focus": true, "needs": "the app in front: `window activate`", "ime_composition": false },

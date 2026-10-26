@@ -700,6 +700,13 @@ impl State {
             }
         }
         let mouse = |kind: &str, button: &str, count: i64| json!({ "type": kind, "x": x, "y": y, "button": button, "clickCount": count });
+        #[cfg(windows)]
+        let browser = crate::proc::listening_pid(self.config.cdp_port);
+        #[cfg(windows)]
+        let menus_before = match (how.right && !how.hover, browser) {
+            (true, Some(pid)) => crate::native::browser_menus(pid),
+            _ => Vec::new(),
+        };
         let mut sent = vec![Instant::now()];
         cdp.call("Input.dispatchMouseEvent", mouse("mouseMoved", "none", 0))
             .await?;
@@ -725,7 +732,20 @@ impl State {
                 _ => "click",
             }
         };
-        Ok(self.stamp(fields! { "action" => action, "x" => x, "y" => y }, &sent))
+        let mut f = fields! { "action" => action, "x" => x, "y" => y };
+        #[cfg(windows)]
+        if action == "right_click" {
+            let closed = match browser {
+                Some(pid) => {
+                    tokio::task::spawn_blocking(move || close_new_browser_menu(pid, &menus_before))
+                        .await
+                        .unwrap_or(false)
+                }
+                None => false,
+            };
+            f.insert("menu_closed".into(), json!(closed));
+        }
+        Ok(self.stamp(f, &sent))
     }
 
     async fn type_cmd(
@@ -854,6 +874,10 @@ pub(super) const DRAG_STEP: Duration = Duration::from_millis(16);
 
 /// The longest a drag may take, well inside a command's default time limit.
 const DRAG_LONGEST: Duration = Duration::from_secs(10);
+
+/// How long a CDP right-click waits for WebView2's context menu to appear.
+#[cfg(windows)]
+const BROWSER_MENU_WAIT: Duration = Duration::from_millis(250);
 
 /// Scrolls the element into view only if it is not already, and returns its rectangle.
 const SCROLL_INTO_VIEW_IF_NEEDED: &str = "function() {
@@ -1567,6 +1591,30 @@ async fn call_on(
         return Err(Failure::new(Kind::JsError, exception_text(e)));
     }
     Ok(r["result"]["value"].clone())
+}
+
+/// Waits up to `BROWSER_MENU_WAIT` for a context menu of WebView2's browser process `pid` that
+/// was not open `before`, and closes it; whether one was closed.
+#[cfg(windows)]
+fn close_new_browser_menu(pid: u32, before: &[isize]) -> bool {
+    let deadline = Instant::now() + BROWSER_MENU_WAIT;
+    loop {
+        let new: Vec<isize> = crate::native::browser_menus(pid)
+            .into_iter()
+            .filter(|h| !before.contains(h))
+            .collect();
+        if !new.is_empty() {
+            return new
+                .into_iter()
+                .filter(|&h| crate::native::close_browser_menu(h))
+                .count()
+                > 0;
+        }
+        if Instant::now() > deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }
 
 #[cfg(test)]
