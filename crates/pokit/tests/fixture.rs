@@ -36,6 +36,25 @@ fn launch_lists_the_main_page_and_close_removes_the_instance() {
     );
 }
 
+#[test]
+fn an_elevated_launch_opens_the_port_starting_the_app_at_medium_integrity_where_webview2_needs_it()
+{
+    if integrity_level(None).is_none_or(|il| il < 0x3000) {
+        eprintln!("needs a test run that is elevated; skipped here");
+        return;
+    }
+    let p = Pokit::launch_fixture("elevated");
+    let launched = p.launched.as_ref().unwrap();
+    let app = integrity_level(Some(p.app_pid()));
+    if launched["integrity"] == "medium" {
+        assert_eq!(app, Some(0x2000), "{launched}");
+    } else {
+        assert!(app.is_some_and(|il| il >= 0x3000), "{app:?} {launched}");
+    }
+    let r = p.run(&["eval", "1 + 1"]);
+    assert_eq!(r.out["value"], 2, "{}", r.out);
+}
+
 /// The ref written beside `line_start` in a snapshot, e.g. `textbox "Name"` → `e1`.
 fn ref_of(snapshot: &str, line_start: &str) -> String {
     let line = snapshot

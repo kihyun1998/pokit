@@ -833,8 +833,25 @@ fn start_session(config: session::Config, timeout: Duration) -> (String, i32, Va
         }
         let encoded = base64_encode(&serde_json::to_vec(&config).unwrap());
         let exe = std::env::current_exe().expect("own executable path");
-        let pid = match proc::spawn_detached(&exe, &["__session", &encoded]) {
+        let runtime = proc::webview2_runtime();
+        let at_medium = cfg!(windows)
+            && config.mode == Mode::Launch
+            && proc::launch_needs_medium(proc::elevated(), runtime.as_deref());
+        let why_medium = format!(
+            "pokit is elevated, and WebView2 {} ignores WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS in an elevated app",
+            runtime.as_deref().unwrap_or("of unknown version")
+        );
+        let pid = match proc::spawn_detached(&exe, &["__session", &encoded], at_medium) {
             Ok(pid) => pid,
+            Err(e) if at_medium => {
+                return outcome_json(
+                    name,
+                    Err(Failure::new(
+                        Kind::Error,
+                        format!("could not start the session at medium integrity ({e}); {why_medium}, so launch needs pokit run unelevated"),
+                    )),
+                )
+            }
             Err(e) => {
                 return outcome_json(
                     name,
@@ -845,6 +862,13 @@ fn start_session(config: session::Config, timeout: Duration) -> (String, i32, Va
                 )
             }
         };
+        let explain = |msg: String| {
+            if at_medium {
+                format!("{msg}; the app was started at medium integrity because {why_medium}")
+            } else {
+                msg
+            }
+        };
         let deadline = Instant::now() + Duration::from_secs(config.ready_timeout_secs) + timeout;
         loop {
             match home::read_session().filter(|s| s.pid == pid) {
@@ -852,6 +876,9 @@ fn start_session(config: session::Config, timeout: Duration) -> (String, i32, Va
                     return match client::request(&s, &Request::Status, timeout) {
                         Ok((code, mut out)) => {
                             out["command"] = json!(name);
+                            if at_medium {
+                                out["integrity"] = json!("medium");
+                            }
                             (name.to_string(), code, out)
                         }
                         Err(e) => outcome_json(name, Err(Failure::new(Kind::Error, e))),
@@ -862,7 +889,7 @@ fn start_session(config: session::Config, timeout: Duration) -> (String, i32, Va
                     let msg = s
                         .error
                         .unwrap_or_else(|| "the session failed to start".into());
-                    return outcome_json(name, Err(Failure::new(Kind::Error, msg)));
+                    return outcome_json(name, Err(Failure::new(Kind::Error, explain(msg))));
                 }
                 _ => {}
             }
@@ -872,7 +899,7 @@ fn start_session(config: session::Config, timeout: Duration) -> (String, i32, Va
                     name,
                     Err(Failure::new(
                         Kind::Timeout,
-                        "the session did not become ready",
+                        explain("the session did not become ready".into()),
                     )),
                 );
             }

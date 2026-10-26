@@ -106,6 +106,79 @@ mod win {
         pub peak_job_memory_used: usize,
     }
 
+    #[link(name = "advapi32")]
+    extern "system" {
+        pub fn OpenProcessToken(process: Handle, access: u32, token: *mut Handle) -> i32;
+        pub fn DuplicateTokenEx(
+            token: Handle,
+            access: u32,
+            attributes: *const c_void,
+            impersonation_level: i32,
+            token_type: i32,
+            new_token: *mut Handle,
+        ) -> i32;
+        pub fn GetTokenInformation(
+            token: Handle,
+            class: i32,
+            info: *mut c_void,
+            len: u32,
+            returned: *mut u32,
+        ) -> i32;
+        pub fn SetTokenInformation(token: Handle, class: i32, info: *const c_void, len: u32)
+            -> i32;
+        #[allow(clippy::too_many_arguments)]
+        pub fn CreateProcessAsUserW(
+            token: Handle,
+            application: *const u16,
+            command_line: *mut u16,
+            process_attributes: *const c_void,
+            thread_attributes: *const c_void,
+            inherit_handles: i32,
+            creation_flags: u32,
+            environment: *const c_void,
+            current_directory: *const u16,
+            startup_info: *const StartupInfoW,
+            process_information: *mut ProcessInformation,
+        ) -> i32;
+        pub fn GetSidSubAuthorityCount(sid: *const c_void) -> *const u8;
+        pub fn GetSidSubAuthority(sid: *const c_void, index: u32) -> *const u32;
+        pub fn RegGetValueW(
+            key: isize,
+            sub_key: *const u16,
+            value: *const u16,
+            flags: u32,
+            kind: *mut u32,
+            data: *mut c_void,
+            len: *mut u32,
+        ) -> i32;
+    }
+    extern "system" {
+        pub fn GetCurrentProcess() -> Handle;
+    }
+
+    pub const TOKEN_ASSIGN_PRIMARY: u32 = 0x0001;
+    pub const TOKEN_DUPLICATE: u32 = 0x0002;
+    pub const TOKEN_QUERY: u32 = 0x0008;
+    pub const TOKEN_ADJUST_DEFAULT: u32 = 0x0080;
+    pub const MAXIMUM_ALLOWED: u32 = 0x0200_0000;
+    pub const SECURITY_IMPERSONATION: i32 = 2;
+    pub const TOKEN_PRIMARY: i32 = 1;
+    /// `TokenIntegrityLevel`.
+    pub const TOKEN_INTEGRITY_LEVEL: i32 = 25;
+    pub const SE_GROUP_INTEGRITY: u32 = 0x20;
+    /// `S-1-16-8192`, the medium mandatory level, as a SID in memory: revision 1, one
+    /// sub-authority, authority 16, sub-authority 0x2000.
+    pub static MEDIUM_SID: [u32; 3] = [0x0000_0101, 0x1000_0000, 0x2000];
+    pub const HKEY_LOCAL_MACHINE: isize = 0x8000_0002u32 as i32 as isize;
+    pub const HKEY_CURRENT_USER: isize = 0x8000_0001u32 as i32 as isize;
+    pub const RRF_RT_REG_SZ: u32 = 0x2;
+
+    #[repr(C)]
+    pub struct TokenMandatoryLabel {
+        pub sid: *const c_void,
+        pub attributes: u32,
+    }
+
     extern "system" {
         pub fn CreateJobObjectW(attributes: *const c_void, name: *const u16) -> Handle;
         pub fn SetInformationJobObject(
@@ -224,10 +297,174 @@ pub fn process_start_time(_pid: u32) -> Option<u64> {
     None
 }
 
-/// Starts `exe args…` detached from this console and, where the job allows it, from this job,
-/// inheriting no handles. Returns the child's process id.
+/// The mandatory integrity level of process `pid`, or of this process when `None`: 0x2000 is
+/// medium, 0x3000 high.
 #[cfg(windows)]
-pub fn spawn_detached(exe: &std::path::Path, args: &[&str]) -> std::io::Result<u32> {
+pub fn integrity_level(pid: Option<u32>) -> Option<u32> {
+    // SAFETY: every handle is checked before use and closed after; the buffer outlives the reads,
+    // and the SID read from it is the one GetTokenInformation wrote there.
+    unsafe {
+        let process = match pid {
+            Some(pid) => win::OpenProcess(win::PROCESS_QUERY_LIMITED_INFORMATION, 0, pid),
+            None => win::GetCurrentProcess(),
+        };
+        if process.is_null() {
+            return None;
+        }
+        let mut token = std::ptr::null_mut();
+        let opened = win::OpenProcessToken(process, win::TOKEN_QUERY, &mut token);
+        if pid.is_some() {
+            win::CloseHandle(process);
+        }
+        if opened == 0 {
+            return None;
+        }
+        let mut buf = [0u64; 16];
+        let mut len = 0;
+        let ok = win::GetTokenInformation(
+            token,
+            win::TOKEN_INTEGRITY_LEVEL,
+            buf.as_mut_ptr() as *mut core::ffi::c_void,
+            std::mem::size_of_val(&buf) as u32,
+            &mut len,
+        );
+        win::CloseHandle(token);
+        if ok == 0 {
+            return None;
+        }
+        let sid = (*(buf.as_ptr() as *const win::TokenMandatoryLabel)).sid;
+        let count = *win::GetSidSubAuthorityCount(sid);
+        Some(*win::GetSidSubAuthority(sid, count.checked_sub(1)? as u32))
+    }
+}
+
+#[cfg(not(windows))]
+pub fn integrity_level(_pid: Option<u32>) -> Option<u32> {
+    None
+}
+
+/// Whether this process runs at high integrity or above.
+pub fn elevated() -> bool {
+    integrity_level(None).is_some_and(|il| il >= 0x3000)
+}
+
+/// The version of the Evergreen WebView2 runtime installed for the machine or for this user,
+/// the newer of the two.
+#[cfg(windows)]
+pub fn webview2_runtime() -> Option<String> {
+    const CLIENT: &str = "Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}";
+    let read = |root: isize, path: String| -> Option<String> {
+        let path: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
+        let name: Vec<u16> = "pv".encode_utf16().chain(Some(0)).collect();
+        let mut buf = [0u16; 64];
+        let mut len = std::mem::size_of_val(&buf) as u32;
+        // SAFETY: both names are NUL-terminated; `buf` and `len` describe a writable buffer.
+        let status = unsafe {
+            win::RegGetValueW(
+                root,
+                path.as_ptr(),
+                name.as_ptr(),
+                win::RRF_RT_REG_SZ,
+                std::ptr::null_mut(),
+                buf.as_mut_ptr() as *mut core::ffi::c_void,
+                &mut len,
+            )
+        };
+        let text = String::from_utf16_lossy(&buf[..(len as usize / 2).saturating_sub(1)]);
+        (status == 0 && runtime_major(&text).is_some()).then_some(text)
+    };
+    [
+        read(
+            win::HKEY_LOCAL_MACHINE,
+            format!("SOFTWARE\\WOW6432Node\\{CLIENT}"),
+        ),
+        read(win::HKEY_CURRENT_USER, format!("Software\\{CLIENT}")),
+    ]
+    .into_iter()
+    .flatten()
+    .max_by_key(|v| runtime_major(v))
+}
+
+#[cfg(not(windows))]
+pub fn webview2_runtime() -> Option<String> {
+    None
+}
+
+/// The major version in a version string such as `156.0.4314.42`.
+pub fn runtime_major(version: &str) -> Option<u32> {
+    version.split('.').next()?.parse().ok()
+}
+
+/// Whether a session launching an app must start at medium integrity for WebView2 to open the
+/// debugging port: this process is elevated and the runtime is 150 or later, or unknown.
+pub fn launch_needs_medium(elevated: bool, runtime: Option<&str>) -> bool {
+    elevated
+        && runtime
+            .and_then(runtime_major)
+            .is_none_or(|major| major >= 150)
+}
+
+/// A primary token like this process's, at medium integrity.
+#[cfg(windows)]
+fn medium_token() -> std::io::Result<win::Handle> {
+    // SAFETY: each handle is checked before use; the label points at a static SID and is passed
+    // with the size of the label plus that SID.
+    unsafe {
+        let mut own = std::ptr::null_mut();
+        let access = win::TOKEN_DUPLICATE
+            | win::TOKEN_QUERY
+            | win::TOKEN_ADJUST_DEFAULT
+            | win::TOKEN_ASSIGN_PRIMARY;
+        if win::OpenProcessToken(win::GetCurrentProcess(), access, &mut own) == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut token = std::ptr::null_mut();
+        let duplicated = win::DuplicateTokenEx(
+            own,
+            win::MAXIMUM_ALLOWED,
+            std::ptr::null(),
+            win::SECURITY_IMPERSONATION,
+            win::TOKEN_PRIMARY,
+            &mut token,
+        );
+        win::CloseHandle(own);
+        if duplicated == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let label = win::TokenMandatoryLabel {
+            sid: win::MEDIUM_SID.as_ptr() as *const core::ffi::c_void,
+            attributes: win::SE_GROUP_INTEGRITY,
+        };
+        let len = std::mem::size_of::<win::TokenMandatoryLabel>()
+            + std::mem::size_of_val(&win::MEDIUM_SID);
+        if win::SetTokenInformation(
+            token,
+            win::TOKEN_INTEGRITY_LEVEL,
+            &label as *const _ as *const core::ffi::c_void,
+            len as u32,
+        ) == 0
+        {
+            let e = std::io::Error::last_os_error();
+            win::CloseHandle(token);
+            return Err(e);
+        }
+        Ok(token)
+    }
+}
+
+/// Starts `exe args…` detached from this console and, where the job allows it, from this job,
+/// inheriting no handles; at medium integrity when `at_medium`. Returns the child's process id.
+#[cfg(windows)]
+pub fn spawn_detached(
+    exe: &std::path::Path,
+    args: &[&str],
+    at_medium: bool,
+) -> std::io::Result<u32> {
+    let token = if at_medium {
+        Some(medium_token()?)
+    } else {
+        None
+    };
     let quote = |s: &str| {
         if s.contains(' ') || s.is_empty() {
             format!("\"{s}\"")
@@ -245,36 +482,65 @@ pub fn spawn_detached(exe: &std::path::Path, args: &[&str]) -> std::io::Result<u
     for flags in [base | CREATE_BREAKAWAY_FROM_JOB, base] {
         let mut wide: Vec<u16> = line.encode_utf16().chain(Some(0)).collect();
         // SAFETY: an all-zero STARTUPINFOW with only `cb` set is valid input; the command line is a
-        // writable NUL-terminated buffer, as CreateProcessW requires, and outlives the call.
+        // writable NUL-terminated buffer, as CreateProcessW and CreateProcessAsUserW require, and
+        // outlives the call; `token` is a live primary token.
         unsafe {
             let mut si: win::StartupInfoW = std::mem::zeroed();
             si.cb = std::mem::size_of::<win::StartupInfoW>() as u32;
             let mut pi: win::ProcessInformation = std::mem::zeroed();
-            let ok = win::CreateProcessW(
-                std::ptr::null(),
-                wide.as_mut_ptr(),
-                std::ptr::null(),
-                std::ptr::null(),
-                0,
-                flags,
-                std::ptr::null(),
-                std::ptr::null(),
-                &si,
-                &mut pi,
-            );
+            let ok = match token {
+                Some(token) => win::CreateProcessAsUserW(
+                    token,
+                    std::ptr::null(),
+                    wide.as_mut_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    0,
+                    flags,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    &si,
+                    &mut pi,
+                ),
+                None => win::CreateProcessW(
+                    std::ptr::null(),
+                    wide.as_mut_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    0,
+                    flags,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    &si,
+                    &mut pi,
+                ),
+            };
             if ok != 0 {
                 win::CloseHandle(pi.thread);
                 win::CloseHandle(pi.process);
+                if let Some(token) = token {
+                    win::CloseHandle(token);
+                }
                 return Ok(pi.process_id);
             }
             last = std::io::Error::last_os_error();
+        }
+    }
+    if let Some(token) = token {
+        // SAFETY: a live token handle owned here, closed once.
+        unsafe {
+            win::CloseHandle(token);
         }
     }
     Err(last)
 }
 
 #[cfg(not(windows))]
-pub fn spawn_detached(exe: &std::path::Path, args: &[&str]) -> std::io::Result<u32> {
+pub fn spawn_detached(
+    exe: &std::path::Path,
+    args: &[&str],
+    _at_medium: bool,
+) -> std::io::Result<u32> {
     use std::process::Stdio;
     Command::new(exe)
         .args(args)
@@ -353,5 +619,33 @@ pub fn kill_tree(pid: u32) -> String {
             String::from_utf8_lossy(&o.stderr).trim()
         ),
         Err(e) => format!("did not run: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn launch_needs_medium_only_when_elevated_on_runtime_150_or_later_or_an_unknown_one() {
+        assert!(launch_needs_medium(true, Some("150.0.4078.48")));
+        assert!(launch_needs_medium(true, Some("156.0.4314.42")));
+        assert!(launch_needs_medium(true, None));
+        assert!(!launch_needs_medium(true, Some("149.0.4022.98")));
+        assert!(!launch_needs_medium(true, Some("131.0.2903.86")));
+        assert!(!launch_needs_medium(false, Some("156.0.4314.42")));
+        assert!(!launch_needs_medium(false, None));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn this_process_has_an_integrity_level_and_a_medium_token_can_be_made() {
+        let own = integrity_level(None).unwrap();
+        assert!(own >= 0x2000, "{own:#x}");
+        let token = medium_token().unwrap();
+        // SAFETY: a live token handle returned above, closed once.
+        unsafe {
+            win::CloseHandle(token);
+        }
     }
 }
