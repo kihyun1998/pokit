@@ -1,0 +1,29 @@
+name: diag-116
+
+on:
+  push:
+    branches: [ci-current-webview2]
+
+jobs:
+  diag:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the fixture
+        run: cargo build -q -p pokit-fixture --target-dir target/fixture
+      - name: Probe on runtime 131
+        shell: pwsh
+        run: ./.github/diag-116.ps1 -Label r131
+      - name: WebView2 runtime (current Evergreen)
+        shell: pwsh
+        run: |
+          $exe = "$env:RUNNER_TEMP\MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
+          Invoke-WebRequest 'https://go.microsoft.com/fwlink/?linkid=2124701' -OutFile $exe
+          $p = Start-Process $exe -ArgumentList '/silent', '/install' -Wait -PassThru
+          "installer exit code: $($p.ExitCode)"
+      - name: Probe on the current runtime
+        shell: pwsh
+        run: ./.github/diag-116.ps1 -Label current
