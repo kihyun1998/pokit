@@ -6,7 +6,11 @@ on:
 
 jobs:
   diag:
-    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - name: Toolchain (rust-toolchain.toml)
@@ -14,9 +18,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build the fixture
         run: cargo build -q -p pokit-fixture --target-dir target/fixture
-      - name: Probe on runtime 131
-        shell: pwsh
-        run: ./.github/diag-116.ps1 -Label r131
       - name: WebView2 runtime (current Evergreen)
         shell: pwsh
         run: |
@@ -24,6 +25,11 @@ jobs:
           Invoke-WebRequest 'https://go.microsoft.com/fwlink/?linkid=2124701' -OutFile $exe
           $p = Start-Process $exe -ArgumentList '/silent', '/install' -Wait -PassThru
           "installer exit code: $($p.ExitCode)"
-      - name: Probe on the current runtime
+      - name: Probe elevated
         shell: pwsh
-        run: ./.github/diag-116.ps1 -Label current
+        run: ./.github/diag-116.ps1 -Label elevated
+      - name: Probe with the app at Medium
+        shell: pwsh
+        run: |
+          ./.github/medium-probe.ps1 -Exe target/fixture/debug/pokit-fixture.exe -Out "$env:RUNNER_TEMP\medium.txt"
+          Get-Content "$env:RUNNER_TEMP\medium.txt"
